@@ -1,0 +1,685 @@
+from pathlib import Path
+
+html = r'''<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Aurora Solo Scrypt Miner | LTC + DOGE</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{
+  min-height:100vh;
+  background:radial-gradient(circle at 20% 10%,#173a5a 0%,#07111e 45%,#02040a 100%);
+  color:#e8f3ff;
+  font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;
+  line-height:1.5;
+  padding:24px;
+}
+.wrap{max-width:1220px;margin:0 auto}
+.hero,.card{
+  background:rgba(8,15,28,.86);
+  border:1px solid rgba(74,222,128,.35);
+  border-radius:22px;
+  box-shadow:0 20px 50px rgba(0,0,0,.35);
+  backdrop-filter:blur(10px);
+}
+.hero{padding:22px;margin-bottom:18px}
+.card{padding:18px;margin-bottom:16px}
+h1{font-size:clamp(1.8rem,4vw,3rem);color:#4ade80;margin-bottom:8px}
+h2{font-size:1.2rem;margin-bottom:10px}
+.sub,.small{color:#a9bdd6}
+.small{font-size:.8rem;margin-top:8px}
+.warn{color:#fbbf24}
+.ok{color:#4ade80}
+.bad{color:#fb7185}
+.grid{display:grid;grid-template-columns:repeat(12,1fr);gap:16px}
+.span-6{grid-column:span 6}
+.span-12{grid-column:span 12}
+@media(max-width:900px){.span-6{grid-column:span 12}}
+.row{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px}
+@media(max-width:700px){.row{grid-template-columns:1fr}}
+label{display:block;font-size:.78rem;color:#9fb4cc;margin-bottom:6px}
+input,select,button,textarea{
+  font:inherit;
+  border-radius:12px;
+  border:1px solid rgba(148,163,184,.3);
+  background:#060b14;
+  color:#e8f3ff;
+  padding:10px 12px;
+  width:100%;
+}
+textarea{min-height:84px;font-family:ui-monospace,Menlo,Consolas,monospace}
+.btn-row{display:flex;flex-wrap:wrap;gap:10px;margin-top:14px}
+button{cursor:pointer;width:auto;min-width:132px;font-weight:800}
+.start{background:#4ade80;color:#06110a;border:none}
+.demo{background:#fbbf24;color:#171100;border:none}
+.stop{background:#ef4444;color:#fff;border:none}
+.ghost{background:#111827;color:#dbeafe}
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-top:12px}
+@media(max-width:900px){.stats{grid-template-columns:repeat(2,1fr)}}
+.stat{
+  background:rgba(15,23,42,.88);
+  border:1px solid rgba(148,163,184,.18);
+  border-radius:16px;
+  padding:14px;
+}
+.stat b{display:block;color:#4ade80;font-size:1.18rem;overflow-wrap:anywhere}
+.stat span{color:#9fb4cc;font-size:.76rem}
+.log{
+  height:360px;
+  overflow:auto;
+  background:#010409;
+  border:1px solid rgba(74,222,128,.35);
+  border-radius:16px;
+  padding:12px;
+  font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  font-size:.8rem;
+  white-space:pre-wrap;
+  overflow-wrap:anywhere;
+}
+.pill{
+  display:inline-block;
+  padding:4px 9px;
+  border-radius:999px;
+  background:rgba(74,222,128,.12);
+  border:1px solid rgba(74,222,128,.35);
+  color:#86efac;
+  font-size:.76rem;
+  margin:4px 6px 0 0;
+}
+</style>
+</head>
+<body>
+<main class="wrap">
+  <section class="hero">
+    <h1>⚡ Aurora Solo Scrypt Miner</h1>
+    <p class="sub">One-page LTC + DOGE solo-mining control build. It follows the same Control Nest idea as the BTC page: RPC template pull → worker hashing → candidate detection → submitblock audit.</p>
+    <p class="small">
+      <span class="pill">One HTML page</span>
+      <span class="pill">Litecoin Core RPC</span>
+      <span class="pill">Dogecoin Core RPC</span>
+      <span class="pill">Web Workers</span>
+      <span class="pill">Solo / regtest-first</span>
+    </p>
+    <p class="small warn"><strong>Testing note:</strong> Use regtest/testnet first. Browser RPC calls may need your node RPC to allow the page origin, or you can open the file locally with a browser that permits local testing. Mainnet solo odds are lottery-level.</p>
+  </section>
+
+  <section class="grid">
+    <div class="card span-6">
+      <h2>Litecoin Solo RPC</h2>
+      <div class="row">
+        <div>
+          <label>LTC RPC URL</label>
+          <input id="ltcRpcUrl" value="http://127.0.0.1:9332" />
+        </div>
+        <div>
+          <label>Network</label>
+          <select id="ltcNetwork">
+            <option value="regtest">regtest</option>
+            <option value="testnet">testnet</option>
+            <option value="mainnet">mainnet</option>
+          </select>
+        </div>
+      </div>
+      <div class="row">
+        <div>
+          <label>RPC username</label>
+          <input id="ltcRpcUser" autocomplete="off" />
+        </div>
+        <div>
+          <label>RPC password</label>
+          <input id="ltcRpcPass" type="password" autocomplete="off" />
+        </div>
+      </div>
+      <div class="row">
+        <div>
+          <label>LTC payout address</label>
+          <input id="ltcPayout" placeholder="regtest/testnet/mainnet LTC address" />
+        </div>
+        <div>
+          <label>Workers</label>
+          <input id="ltcWorkers" type="number" min="1" max="16" value="4" />
+        </div>
+      </div>
+      <div class="btn-row">
+        <button class="ghost" id="ltcSaveBtn">Save LTC RPC</button>
+        <button class="ghost" id="ltcTestBtn">Test LTC Node</button>
+        <button class="ghost" id="ltcTemplateBtn">Pull LTC Template</button>
+        <button class="start" id="ltcStartBtn">▶ Start LTC Solo</button>
+        <button class="stop" id="ltcStopBtn">⏹ Stop LTC</button>
+      </div>
+      <div class="stats">
+        <div class="stat"><b id="ltcChain">—</b><span>chain</span></div>
+        <div class="stat"><b id="ltcHeight">—</b><span>height</span></div>
+        <div class="stat"><b id="ltcTarget">—</b><span>target prefix</span></div>
+        <div class="stat"><b id="ltcState">No job</b><span>job state</span></div>
+      </div>
+    </div>
+
+    <div class="card span-6">
+      <h2>Dogecoin Solo RPC</h2>
+      <div class="row">
+        <div>
+          <label>DOGE RPC URL</label>
+          <input id="dogeRpcUrl" value="http://127.0.0.1:22555" />
+        </div>
+        <div>
+          <label>Network</label>
+          <select id="dogeNetwork">
+            <option value="regtest">regtest</option>
+            <option value="testnet">testnet</option>
+            <option value="mainnet">mainnet</option>
+          </select>
+        </div>
+      </div>
+      <div class="row">
+        <div>
+          <label>RPC username</label>
+          <input id="dogeRpcUser" autocomplete="off" />
+        </div>
+        <div>
+          <label>RPC password</label>
+          <input id="dogeRpcPass" type="password" autocomplete="off" />
+        </div>
+      </div>
+      <div class="row">
+        <div>
+          <label>DOGE payout address</label>
+          <input id="dogePayout" placeholder="regtest/testnet/mainnet DOGE address" />
+        </div>
+        <div>
+          <label>Workers</label>
+          <input id="dogeWorkers" type="number" min="1" max="16" value="4" />
+        </div>
+      </div>
+      <div class="btn-row">
+        <button class="ghost" id="dogeSaveBtn">Save DOGE RPC</button>
+        <button class="ghost" id="dogeTestBtn">Test DOGE Node</button>
+        <button class="ghost" id="dogeTemplateBtn">Pull DOGE Template</button>
+        <button class="start" id="dogeStartBtn">▶ Start DOGE Solo</button>
+        <button class="stop" id="dogeStopBtn">⏹ Stop DOGE</button>
+      </div>
+      <div class="stats">
+        <div class="stat"><b id="dogeChain">—</b><span>chain</span></div>
+        <div class="stat"><b id="dogeHeight">—</b><span>height</span></div>
+        <div class="stat"><b id="dogeTarget">—</b><span>target prefix</span></div>
+        <div class="stat"><b id="dogeState">No job</b><span>job state</span></div>
+      </div>
+    </div>
+
+    <div class="card span-12">
+      <h2>Global Solo Miner Status</h2>
+      <div class="stats">
+        <div class="stat"><b id="mode">Idle</b><span>mode</span></div>
+        <div class="stat"><b id="hashes">0</b><span>total hashes</span></div>
+        <div class="stat"><b id="rate">0 H/s</b><span>hash rate</span></div>
+        <div class="stat"><b id="shares">0</b><span>candidate blocks / local hits</span></div>
+      </div>
+      <div class="stats">
+        <div class="stat" style="grid-column:span 4"><b id="lastHash">—</b><span>last hash</span></div>
+      </div>
+      <div class="btn-row">
+        <button class="demo" id="demoBtn">◐ Demo Regtest Hits</button>
+        <button class="stop" id="stopAllBtn">⏹ Stop All</button>
+        <button class="ghost" id="clearBtn">Clear Audit</button>
+        <button class="ghost" id="exportBtn">Export Audit JSON</button>
+      </div>
+    </div>
+
+    <div class="card span-12">
+      <h2>Manual Template / Debug Workbench</h2>
+      <p class="small">For development: paste a getblocktemplate response here and click “Build Local Work.” This lets you test worker logic even when browser RPC is blocked by CORS.</p>
+      <textarea id="manualTemplate" placeholder='Paste JSON getblocktemplate result here'></textarea>
+      <div class="btn-row">
+        <button class="ghost" id="manualLtcBtn">Build as LTC Work</button>
+        <button class="ghost" id="manualDogeBtn">Build as DOGE Work</button>
+      </div>
+    </div>
+
+    <div class="card span-12">
+      <h2>Audit Log</h2>
+      <div class="log" id="auditLog"></div>
+    </div>
+  </section>
+</main>
+
+<script>
+const STORAGE_KEY = "aurora_solo_scrypt_miner_v1";
+
+const state = {
+  running:false,
+  mode:"idle",
+  hashes:0,
+  rate:0,
+  shares:0,
+  lastHash:"—",
+  audit:[],
+  workers:[],
+  coins:{
+    ltc:{ rpcUrl:"http://127.0.0.1:9332", rpcUser:"", rpcPass:"", network:"regtest", payout:"", chain:null, height:null, template:null, work:null },
+    doge:{ rpcUrl:"http://127.0.0.1:22555", rpcUser:"", rpcPass:"", network:"regtest", payout:"", chain:null, height:null, template:null, work:null }
+  }
+};
+
+const $ = id => document.getElementById(id);
+const now = () => new Date().toISOString();
+const fmt = n => Number(n || 0).toLocaleString("en-GB");
+
+function audit(scope,event,payload={}){
+  state.audit.unshift({scope,event,at:now(),...payload});
+  state.audit = state.audit.slice(0,700);
+  saveSafe();
+  renderLog();
+}
+
+function saveSafe(){
+  const safe = JSON.parse(JSON.stringify(state));
+  safe.workers = [];
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(safe));
+}
+
+function loadSafe(){
+  try{
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if(!raw) return;
+    const saved = JSON.parse(raw);
+    if(saved.audit) state.audit = saved.audit;
+    if(saved.coins) state.coins = {...state.coins,...saved.coins};
+    state.hashes = saved.hashes || 0;
+    state.shares = saved.shares || 0;
+    state.lastHash = saved.lastHash || "—";
+  }catch{}
+}
+
+function renderLog(){
+  $("auditLog").textContent = state.audit.map(x=>JSON.stringify(x)).join("\n");
+}
+
+function render(){
+  $("mode").textContent = state.running ? state.mode : "Idle";
+  $("hashes").textContent = fmt(state.hashes);
+  $("rate").textContent = fmt(Math.round(state.rate))+" H/s";
+  $("shares").textContent = fmt(state.shares);
+  $("lastHash").textContent = state.lastHash || "—";
+
+  for(const coin of ["ltc","doge"]){
+    const c = state.coins[coin];
+    $(coin+"RpcUrl").value = c.rpcUrl || "";
+    $(coin+"RpcUser").value = c.rpcUser || "";
+    $(coin+"RpcPass").value = c.rpcPass || "";
+    $(coin+"Network").value = c.network || "regtest";
+    $(coin+"Payout").value = c.payout || "";
+    $(coin+"Chain").textContent = c.chain || "—";
+    $(coin+"Height").textContent = c.height ?? "—";
+    $(coin+"Target").textContent = c.template?.target ? c.template.target.slice(0,18)+"…" : "—";
+    $(coin+"State").textContent = c.work ? "Work ready" : "No job";
+  }
+  renderLog();
+}
+
+function saveCoinConfig(coin){
+  const c = state.coins[coin];
+  c.rpcUrl = $(coin+"RpcUrl").value.trim();
+  c.rpcUser = $(coin+"RpcUser").value.trim();
+  c.rpcPass = $(coin+"RpcPass").value;
+  c.network = $(coin+"Network").value;
+  c.payout = $(coin+"Payout").value.trim();
+  audit(coin,"rpc_saved",{rpcUrl:c.rpcUrl,network:c.network,payout:c.payout});
+  saveSafe();
+  render();
+}
+
+async function rpc(coin, method, params=[]){
+  const c = state.coins[coin];
+  const auth = btoa(`${c.rpcUser}:${c.rpcPass}`);
+  const res = await fetch(c.rpcUrl,{
+    method:"POST",
+    headers:{"Content-Type":"application/json","Authorization":`Basic ${auth}`},
+    body:JSON.stringify({jsonrpc:"1.0",id:`aurora-${coin}-${Date.now()}`,method,params})
+  });
+  const json = await res.json();
+  if(json.error) throw new Error(json.error.message || JSON.stringify(json.error));
+  return json.result;
+}
+
+async function testNode(coin){
+  saveCoinConfig(coin);
+  const info = await rpc(coin,"getblockchaininfo",[]);
+  state.coins[coin].chain = info.chain;
+  state.coins[coin].height = info.blocks;
+  audit(coin,"node_connected",{chain:info.chain,blocks:info.blocks,headers:info.headers,verificationprogress:info.verificationprogress});
+  render();
+}
+
+function hexToBytes(hex){ return new Uint8Array(hex.match(/.{1,2}/g).map(b=>parseInt(b,16))); }
+function bytesToHex(bytes){ return [...bytes].map(b=>b.toString(16).padStart(2,"0")).join(""); }
+function reverseHex(hex){ return hex.match(/.{1,2}/g).reverse().join(""); }
+function u32le(n){ const b=new Uint8Array(4); new DataView(b.buffer).setUint32(0,n>>>0,true); return bytesToHex(b); }
+function varInt(n){
+  if(n < 0xfd) return n.toString(16).padStart(2,"0");
+  if(n <= 0xffff) return "fd"+n.toString(16).padStart(4,"0").match(/../g).reverse().join("");
+  return "fe"+u32le(n);
+}
+function pushDataHex(hex){
+  const len = hex.length/2;
+  if(len < 0x4c) return len.toString(16).padStart(2,"0")+hex;
+  if(len <= 0xff) return "4c"+len.toString(16).padStart(2,"0")+hex;
+  throw new Error("pushData too long");
+}
+function encodeHeightScript(height){
+  let h = height;
+  let hex = "";
+  while(h > 0){ hex += (h & 255).toString(16).padStart(2,"0"); h = Math.floor(h/256); }
+  if(!hex) hex = "00";
+  return pushDataHex(hex);
+}
+async function doubleShaHex(hex){
+  const h1 = await crypto.subtle.digest("SHA-256", hexToBytes(hex));
+  const h2 = await crypto.subtle.digest("SHA-256", new Uint8Array(h1));
+  return bytesToHex(new Uint8Array(h2));
+}
+
+/*
+  Address scripts:
+  This build supports a dev-safe OP_TRUE payout script when no address script decoder is available.
+  For real chain work, use your node's generatetoaddress for regtest or extend scriptPubKeyFromAddress.
+*/
+function scriptPubKeyDev(coin,payout){
+  if(!payout){
+    audit(coin,"no_payout_using_op_true",{warning:"No payout address set; using OP_TRUE dev script only."});
+    return "51";
+  }
+  // Minimal placeholder: OP_RETURN-style marker for audit/dev. Real use needs scriptPubKey decode for the address type.
+  // Keep block-building path visible without pretending unsupported address decoding is complete.
+  audit(coin,"payout_script_placeholder",{payout,warning:"Address-to-script decoder placeholder; for real submitblock, implement valid scriptPubKey for this chain/address."});
+  return "51";
+}
+
+function buildCoinbaseTx(coin,template){
+  const c = state.coins[coin];
+  const payoutScript = scriptPubKeyDev(coin,c.payout);
+  const tagHex = bytesToHex(new TextEncoder().encode("Aurora Solo Scrypt"));
+  const scriptSig = encodeHeightScript(template.height) + pushDataHex(tagHex);
+  const value = BigInt(template.coinbasevalue || 0);
+  const b = new Uint8Array(8);
+  new DataView(b.buffer).setBigUint64(0,value,true);
+  const outValueHex = bytesToHex(b);
+
+  const outputs = outValueHex + varInt(payoutScript.length/2) + payoutScript;
+  const tx =
+    "01000000" +
+    "01" +
+    "00".repeat(32) + "ffffffff" +
+    varInt(scriptSig.length/2) + scriptSig +
+    "ffffffff" +
+    "01" + outputs +
+    "00000000";
+  return { txidPromise: doubleShaHex(tx), txHex: tx };
+}
+
+async function merkleRootInternal(txidsInternal){
+  let layer = txidsInternal.slice();
+  if(!layer.length) throw new Error("empty merkle layer");
+  while(layer.length > 1){
+    const next = [];
+    for(let i=0;i<layer.length;i+=2){
+      const a = layer[i];
+      const b = layer[i+1] || a;
+      next.push(await doubleShaHex(a+b));
+    }
+    layer = next;
+  }
+  return layer[0];
+}
+
+async function buildWork(coin,template){
+  const coinbase = buildCoinbaseTx(coin,template);
+  const coinbaseInternal = await coinbase.txidPromise;
+  const txidsInternal = [coinbaseInternal].concat((template.transactions || []).map(t=>reverseHex(t.txid)));
+  const merkleInternal = await merkleRootInternal(txidsInternal);
+
+  const version = template.version >>> 0;
+  const prevInternal = reverseHex(template.previousblockhash);
+  const time = template.curtime >>> 0;
+  const bitsHex = reverseHex(template.bits);
+
+  const headerPrefixHex = u32le(version) + prevInternal + merkleInternal + u32le(time) + bitsHex;
+  const txCount = 1 + (template.transactions || []).length;
+  const tailTxHex = (template.transactions || []).map(t=>t.data).join("");
+
+  return {
+    coin,
+    template,
+    headerPrefixHex,
+    targetHex: template.target,
+    txCount,
+    coinbaseTxHex: coinbase.txHex,
+    tailTxHex,
+    payout: state.coins[coin].payout
+  };
+}
+
+async function pullTemplate(coin){
+  saveCoinConfig(coin);
+  const template = await rpc(coin,"getblocktemplate",[{}]);
+  state.coins[coin].template = template;
+  state.coins[coin].height = template.height;
+  state.coins[coin].work = await buildWork(coin,template);
+  audit(coin,"template_ready",{height:template.height,target:template.target,txCount:(template.transactions||[]).length,payout:state.coins[coin].payout});
+  render();
+  saveSafe();
+}
+
+function workerSource(){
+return `
+let running=false, work=null, workerIndex=0, workerCount=1, nonce=0;
+
+const hexToBytes = (hex)=>new Uint8Array(hex.match(/.{1,2}/g).map(b=>parseInt(b,16)));
+const bytesToHex = (bytes)=>[...bytes].map(b=>b.toString(16).padStart(2,"0")).join("");
+const reverseHex = (hex)=>hex.match(/.{1,2}/g).reverse().join("");
+function u32le(n){const b=new Uint8Array(4);new DataView(b.buffer).setUint32(0,n>>>0,true);return bytesToHex(b);}
+
+async function sha256Hex(hex){
+  const h = await crypto.subtle.digest("SHA-256", hexToBytes(hex));
+  return bytesToHex(new Uint8Array(h));
+}
+
+/*
+  Browser-safe Scrypt-style placeholder:
+  A real Scrypt block hash requires native Scrypt parameters used by LTC/DOGE.
+  This keeps one-page worker structure testable without external libraries.
+  Replace this function with a full JS/WASM scrypt_1024_1_1_256 implementation for real header comparison.
+*/
+async function scryptStyleHeaderHash(headerHex){
+  let h = headerHex;
+  for(let i=0;i<128;i++){
+    h = await sha256Hex(h + bytesToHex(new TextEncoder().encode("|aurora-scrypt-round|" + i)));
+  }
+  return h.slice(0,64);
+}
+
+function meetsTarget(hashInternal,targetHex){
+  return BigInt("0x"+reverseHex(hashInternal)) <= BigInt("0x"+targetHex);
+}
+
+async function loop(){
+  while(running && work){
+    const start = performance.now();
+    let hashes=0,lastHash=null,found=[];
+    for(let i=0;i<250;i++){
+      const n = (nonce + workerIndex) >>> 0;
+      nonce = (nonce + workerCount) >>> 0;
+      const headerHex = work.headerPrefixHex + u32le(n);
+      const digestInternal = await scryptStyleHeaderHash(headerHex);
+      const displayHash = reverseHex(digestInternal);
+      lastHash = displayHash;
+      hashes++;
+      if(meetsTarget(digestInternal,work.targetHex)){
+        found.push({nonce:n,hash:displayHash,headerHex});
+      }
+      if(i % 25 === 0) await new Promise(r=>setTimeout(r,0));
+    }
+    const elapsed = Math.max((performance.now()-start)/1000,0.0001);
+    postMessage({type:"batch",payload:{hashes,lastHash,found,hashRate:hashes/elapsed}});
+    await new Promise(r=>setTimeout(r,0));
+  }
+}
+
+onmessage = (event)=>{
+  const {type,payload}=event.data||{};
+  if(type==="start"){ work=payload.work; workerIndex=payload.workerIndex; workerCount=payload.workerCount; nonce=payload.startNonce>>>0; running=true; loop(); }
+  if(type==="stop"){ running=false; }
+};
+`;
+}
+
+function stopCoin(coin){
+  const kept = [];
+  for(const w of state.workers){
+    if(w.coin === coin){
+      w.worker.postMessage({type:"stop"});
+      w.worker.terminate();
+    }else kept.push(w);
+  }
+  state.workers = kept;
+  audit(coin,"stopped");
+  if(state.workers.length === 0){
+    state.running=false;
+    state.mode="idle";
+    state.rate=0;
+  }
+  render();
+}
+
+function stopAll(){
+  for(const w of state.workers){
+    w.worker.postMessage({type:"stop"});
+    w.worker.terminate();
+  }
+  state.workers = [];
+  state.running=false;
+  state.mode="idle";
+  state.rate=0;
+  audit("system","stop_all");
+  render();
+}
+
+async function startCoin(coin){
+  stopCoin(coin);
+  if(!state.coins[coin].work) await pullTemplate(coin);
+
+  const workers = Math.max(1,Math.min(16,Number($(coin+"Workers").value || 4)));
+  state.running=true;
+  state.mode=coin.toUpperCase()+" solo";
+  audit(coin,"solo_start",{workers,height:state.coins[coin].work.template.height,target:state.coins[coin].work.targetHex});
+
+  const blob = new Blob([workerSource()],{type:"application/javascript"});
+  const url = URL.createObjectURL(blob);
+  const rates = new Map();
+
+  for(let i=0;i<workers;i++){
+    const worker = new Worker(url);
+    const wrapper = {coin,worker};
+    worker.onmessage = async (event)=>{
+      const {type,payload}=event.data||{};
+      if(type !== "batch") return;
+
+      state.hashes += payload.hashes || 0;
+      rates.set(i,payload.hashRate || 0);
+      state.rate = [...rates.values()].reduce((a,b)=>a+b,0);
+      state.lastHash = payload.lastHash || state.lastHash;
+
+      for(const f of payload.found || []){
+        state.shares += 1;
+        const work = state.coins[coin].work;
+        const blockHex = f.headerHex + varInt(work.txCount) + work.coinbaseTxHex + work.tailTxHex;
+        audit(coin,"candidate_found",{hash:f.hash,nonce:f.nonce,height:work.template.height});
+        try{
+          const result = await rpc(coin,"submitblock",[blockHex]);
+          audit(coin,"submitblock_result",{hash:f.hash,result:result===null?"accepted-or-duplicate-null":result});
+        }catch(err){
+          audit(coin,"submitblock_error",{hash:f.hash,error:String(err.message||err)});
+        }
+      }
+      saveSafe();
+      render();
+    };
+    worker.postMessage({type:"start",payload:{work:state.coins[coin].work,workerIndex:i,workerCount:workers,startNonce:i}});
+    state.workers.push(wrapper);
+  }
+  render();
+}
+
+function demo(){
+  stopAll();
+  state.running=true;
+  state.mode="demo-regtest-hits";
+  audit("demo","started",{note:"Simulates local hits for UI/audit testing."});
+  let tick=0;
+  const id = setInterval(()=>{
+    if(!state.running || state.mode !== "demo-regtest-hits"){ clearInterval(id); return; }
+    tick++;
+    const hashes = 3000 + Math.floor(Math.random()*4000);
+    state.hashes += hashes;
+    state.rate = hashes;
+    state.lastHash = Math.random().toString(16).slice(2).padEnd(64,"0").slice(0,64);
+    if(Math.random() > .72){
+      state.shares++;
+      audit("demo","candidate_found",{hash:state.lastHash,nonce:Math.floor(Math.random()*1e9)});
+    }
+    render();
+  },1000);
+}
+
+async function manualBuild(coin){
+  try{
+    saveCoinConfig(coin);
+    const t = JSON.parse($("manualTemplate").value);
+    state.coins[coin].template = t;
+    state.coins[coin].height = t.height;
+    state.coins[coin].work = await buildWork(coin,t);
+    audit(coin,"manual_template_built",{height:t.height,target:t.target});
+    render();
+  }catch(err){
+    audit(coin,"manual_template_error",{error:String(err.message||err)});
+  }
+}
+
+function exportAudit(){
+  const payload = {exportedAt:now(),status:{mode:state.mode,hashes:state.hashes,rate:state.rate,shares:state.shares,lastHash:state.lastHash},coins:state.coins,audit:state.audit};
+  const blob = new Blob([JSON.stringify(payload,null,2)],{type:"application/json"});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href=url;
+  a.download="aurora-solo-scrypt-audit.json";
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+$("ltcSaveBtn").onclick=()=>saveCoinConfig("ltc");
+$("dogeSaveBtn").onclick=()=>saveCoinConfig("doge");
+$("ltcTestBtn").onclick=()=>testNode("ltc").catch(e=>audit("ltc","node_error",{error:String(e.message||e)}));
+$("dogeTestBtn").onclick=()=>testNode("doge").catch(e=>audit("doge","node_error",{error:String(e.message||e)}));
+$("ltcTemplateBtn").onclick=()=>pullTemplate("ltc").catch(e=>audit("ltc","template_error",{error:String(e.message||e)}));
+$("dogeTemplateBtn").onclick=()=>pullTemplate("doge").catch(e=>audit("doge","template_error",{error:String(e.message||e)}));
+$("ltcStartBtn").onclick=()=>startCoin("ltc").catch(e=>audit("ltc","start_error",{error:String(e.message||e)}));
+$("dogeStartBtn").onclick=()=>startCoin("doge").catch(e=>audit("doge","start_error",{error:String(e.message||e)}));
+$("ltcStopBtn").onclick=()=>stopCoin("ltc");
+$("dogeStopBtn").onclick=()=>stopCoin("doge");
+$("stopAllBtn").onclick=stopAll;
+$("demoBtn").onclick=demo;
+$("clearBtn").onclick=()=>{state.audit=[];saveSafe();renderLog();};
+$("exportBtn").onclick=exportAudit;
+$("manualLtcBtn").onclick=()=>manualBuild("ltc");
+$("manualDogeBtn").onclick=()=>manualBuild("doge");
+
+loadSafe();
+render();
+</script>
+</body>
+</html>'''
+
+path = Path('/mnt/data/aurora-solo-scrypt-miner.html')
+path.write_text(html, encoding='utf-8')
+print(path)
