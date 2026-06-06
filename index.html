@@ -132,6 +132,65 @@ const coin=u.pathname.slice(1);if(![&quot;ltc&quot;,&quot;doge&quot;].includes(c
 try{const j=await body(req);const allowed=new Set([&quot;getblockchaininfo&quot;,&quot;getnetworkinfo&quot;,&quot;getmininginfo&quot;,&quot;getblocktemplate&quot;,&quot;submitblock&quot;]);if(!allowed.has(j.method))return send(res,400,{jsonrpc:&quot;2.0&quot;,id:j.id||null,result:null,error:{code:-32601,message:&quot;method blocked by gateway&quot;}});send(res,200,await rpc(coin,j.method,Array.isArray(j.params)?j.params:[]))}catch(e){send(res,500,{jsonrpc:&quot;2.0&quot;,id:null,result:null,error:{code:-32000,message:String(e.message||e)}})}
 }).listen(PORT,&quot;127.0.0.1&quot;,()=&gt;console.log(&quot;Aurora Scrypt Gateway: http://127.0.0.1:&quot;+PORT));</textarea>
 </section>
+
+  <section class="card" id="poolMiningPanel">
+    <h2>🏊 Pool Mining Mode — Stratum Gateway</h2>
+    <p class="small">Pool mode lets this page connect to a mining pool through a local Stratum gateway. The browser page talks to the gateway, and the gateway talks to the LTC/DOGE pool.</p>
+
+    <div class="row">
+      <div>
+        <label>Stratum Gateway URL</label>
+        <input id="poolGatewayUrl" value="http://127.0.0.1:8790" />
+      </div>
+      <div>
+        <label>Coin</label>
+        <select id="poolCoin">
+          <option value="ltc">LTC</option>
+          <option value="doge">DOGE</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="row">
+      <div>
+        <label>Pool URL</label>
+        <input id="poolUrl" placeholder="stratum+tcp://pool.example.com:3333" />
+      </div>
+      <div>
+        <label>Pool worker name</label>
+        <input id="poolWorker" placeholder="username.worker1" />
+      </div>
+    </div>
+
+    <div class="row">
+      <div>
+        <label>Pool password</label>
+        <input id="poolPass" value="x" />
+      </div>
+      <div>
+        <label>Pool workers</label>
+        <input id="poolWorkers" type="number" min="1" max="16" value="4" />
+      </div>
+    </div>
+
+    <div class="btn-row">
+      <button class="ghost" id="downloadStratumGatewayBtn">Download Stratum Gateway</button>
+      <button class="ghost" id="poolConnectBtn">Connect Pool</button>
+      <button class="ghost" id="poolStatusBtn">Pool Status</button>
+      <button class="start" id="poolStartBtn">▶ Start Pool Mining</button>
+      <button class="stop" id="poolStopBtn">⏹ Stop Pool</button>
+    </div>
+
+    <div class="poolgrid">
+      <div class="stat"><b id="poolSession">—</b><span>session</span></div>
+      <div class="stat"><b id="poolDiff">—</b><span>pool difficulty</span></div>
+      <div class="stat"><b id="poolJob">—</b><span>last pool job</span></div>
+    </div>
+
+    <p class="small">Use this with <code>node aurora-stratum-gateway.js</code>. The gateway file is embedded below and can be exported with the button above.</p>
+    <textarea id="embeddedStratumGatewayCode" class="codebox" readonly></textarea>
+  </section>
+
 <section class="grid">
     <div class="card span-6">
       <h2>Litecoin Solo RPC</h2>
@@ -650,6 +709,14 @@ async function manualBuild(coin){
 
 const EMBEDDED_STRATUM_GATEWAY_JS = '#!/usr/bin/env node\n/**\n * Aurora LTC + DOGE Stratum Pool Gateway\n * ------------------------------------------------------------\n * Adds pool-mining mode for Aurora browser workers.\n *\n * Browser talks HTTP/WebSocket-style polling to this local gateway.\n * Gateway talks TCP Stratum to a mining pool.\n *\n * Routes:\n *   GET  /health\n *   POST /pool/connect\n *   POST /pool/status\n *   POST /pool/work\n *   POST /pool/submit\n *   POST /pool/disconnect\n *\n * Run:\n *   node aurora-stratum-gateway.js\n *\n * Example pool URL:\n *   stratum+tcp://litecoinpool.org:3333\n */\n\nconst http = require("http");\nconst net = require("net");\nconst { URL } = require("url");\n\nconst PORT = Number(process.env.STRATUM_GATEWAY_PORT || 8790);\n\nconst sessions = new Map();\n\nfunction setCors(res) {\n  res.setHeader("Access-Control-Allow-Origin", "*");\n  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");\n  res.setHeader("Access-Control-Allow-Headers", "Content-Type,Authorization");\n}\n\nfunction sendJson(res, status, obj) {\n  const body = JSON.stringify(obj, null, 2);\n  res.writeHead(status, {"Content-Type":"application/json; charset=utf-8","Content-Length":Buffer.byteLength(body)});\n  res.end(body);\n}\n\nfunction readBody(req) {\n  return new Promise((resolve, reject) => {\n    let data = "";\n    req.on("data", c => data += c);\n    req.on("end", () => {\n      if (!data) return resolve({});\n      try { resolve(JSON.parse(data)); }\n      catch { reject(new Error("Invalid JSON body")); }\n    });\n    req.on("error", reject);\n  });\n}\n\nfunction normalizePoolUrl(raw) {\n  if (!raw) throw new Error("Missing poolUrl");\n  let url = raw.trim();\n  if (url.startsWith("stratum+tcp://")) url = "tcp://" + url.slice("stratum+tcp://".length);\n  if (!url.includes("://")) url = "tcp://" + url;\n  const u = new URL(url);\n  return {\n    host: u.hostname,\n    port: Number(u.port || 3333),\n    display: raw\n  };\n}\n\nfunction makeSessionId() {\n  return "aurora-pool-" + Date.now() + "-" + Math.random().toString(16).slice(2);\n}\n\nclass StratumSession {\n  constructor({ coin, poolUrl, workerName, workerPass }) {\n    this.id = makeSessionId();\n    this.coin = coin || "ltc";\n    this.poolUrl = poolUrl;\n    this.workerName = workerName;\n    this.workerPass = workerPass || "x";\n    this.socket = null;\n    this.buffer = "";\n    this.nextId = 1;\n    this.pending = new Map();\n    this.connected = false;\n    this.authorized = false;\n    this.subscribed = false;\n    this.extranonce1 = null;\n    this.extranonce2Size = 4;\n    this.difficulty = 1;\n    this.jobs = [];\n    this.lastJob = null;\n    this.messages = [];\n    this.accepted = 0;\n    this.rejected = 0;\n  }\n\n  log(event, payload = {}) {\n    const item = { at: new Date().toISOString(), event, ...payload };\n    this.messages.unshift(item);\n    this.messages = this.messages.slice(0, 100);\n  }\n\n  send(method, params = []) {\n    const id = this.nextId++;\n    const msg = { id, method, params };\n    this.socket.write(JSON.stringify(msg) + "\\n");\n    return id;\n  }\n\n  connect() {\n    return new Promise((resolve, reject) => {\n      const p = normalizePoolUrl(this.poolUrl);\n      this.socket = net.createConnection({ host: p.host, port: p.port }, () => {\n        this.connected = true;\n        this.log("tcp_connected", { host: p.host, port: p.port });\n        this.send("mining.subscribe", ["AuroraStratum/0.1"]);\n        this.send("mining.authorize", [this.workerName, this.workerPass]);\n        resolve();\n      });\n\n      this.socket.on("data", chunk => this.onData(chunk));\n      this.socket.on("error", err => {\n        this.log("socket_error", { error: err.message });\n        if (!this.connected) reject(err);\n      });\n      this.socket.on("close", () => {\n        this.connected = false;\n        this.authorized = false;\n        this.log("socket_closed");\n      });\n    });\n  }\n\n  onData(chunk) {\n    this.buffer += chunk.toString("utf8");\n    let idx;\n    while ((idx = this.buffer.indexOf("\\n")) >= 0) {\n      const line = this.buffer.slice(0, idx).trim();\n      this.buffer = this.buffer.slice(idx + 1);\n      if (!line) continue;\n      let msg;\n      try { msg = JSON.parse(line); }\n      catch { this.log("bad_json", { line: line.slice(0, 200) }); continue; }\n      this.handleMessage(msg);\n    }\n  }\n\n  handleMessage(msg) {\n    if (msg.method === "mining.set_difficulty") {\n      this.difficulty = Number(msg.params && msg.params[0] || 1);\n      this.log("set_difficulty", { difficulty: this.difficulty });\n      return;\n    }\n\n    if (msg.method === "mining.notify") {\n      const p = msg.params || [];\n      const job = {\n        jobId: p[0],\n        prevhash: p[1],\n        coinb1: p[2],\n        coinb2: p[3],\n        merkleBranch: p[4] || [],\n        version: p[5],\n        nbits: p[6],\n        ntime: p[7],\n        cleanJobs: !!p[8],\n        difficulty: this.difficulty,\n        extranonce1: this.extranonce1,\n        extranonce2Size: this.extranonce2Size,\n        receivedAt: new Date().toISOString()\n      };\n      if (job.cleanJobs) this.jobs = [];\n      this.jobs.unshift(job);\n      this.jobs = this.jobs.slice(0, 20);\n      this.lastJob = job;\n      this.log("notify", { jobId: job.jobId, difficulty: job.difficulty });\n      return;\n    }\n\n    if (msg.id && Array.isArray(msg.result)) {\n      // subscribe result commonly: [[...], extranonce1, extranonce2_size]\n      if (msg.result.length >= 3 && typeof msg.result[1] === "string") {\n        this.subscribed = true;\n        this.extranonce1 = msg.result[1];\n        this.extranonce2Size = Number(msg.result[2] || 4);\n        this.log("subscribed", { extranonce1: this.extranonce1, extranonce2Size: this.extranonce2Size });\n      }\n    }\n\n    if (msg.id && typeof msg.result === "boolean") {\n      if (msg.result === true && !this.authorized) {\n        this.authorized = true;\n        this.log("authorized", { workerName: this.workerName });\n      } else if (msg.result === true) {\n        this.accepted += 1;\n        this.log("share_accepted", { id: msg.id });\n      } else {\n        this.rejected += 1;\n        this.log("share_rejected", { id: msg.id, error: msg.error });\n      }\n    }\n\n    if (msg.error) {\n      this.rejected += 1;\n      this.log("stratum_error", { id: msg.id, error: msg.error });\n    }\n  }\n\n  getWork() {\n    if (!this.lastJob) throw new Error("No stratum job received yet");\n    return {\n      sessionId: this.id,\n      coin: this.coin,\n      connected: this.connected,\n      authorized: this.authorized,\n      subscribed: this.subscribed,\n      difficulty: this.difficulty,\n      extranonce1: this.extranonce1,\n      extranonce2Size: this.extranonce2Size,\n      job: this.lastJob\n    };\n  }\n\n  submit({ jobId, extranonce2, ntime, nonce }) {\n    if (!this.socket || !this.connected) throw new Error("Not connected");\n    if (!jobId || !extranonce2 || !ntime || !nonce) throw new Error("Missing submit fields");\n    const id = this.send("mining.submit", [this.workerName, jobId, extranonce2, ntime, nonce]);\n    this.log("share_submitted", { id, jobId, extranonce2, ntime, nonce });\n    return { id };\n  }\n\n  close() {\n    if (this.socket) this.socket.destroy();\n    this.connected = false;\n  }\n\n  status() {\n    return {\n      id: this.id,\n      coin: this.coin,\n      poolUrl: this.poolUrl,\n      workerName: this.workerName,\n      connected: this.connected,\n      subscribed: this.subscribed,\n      authorized: this.authorized,\n      difficulty: this.difficulty,\n      extranonce1: this.extranonce1,\n      extranonce2Size: this.extranonce2Size,\n      lastJobId: this.lastJob && this.lastJob.jobId,\n      accepted: this.accepted,\n      rejected: this.rejected,\n      messages: this.messages\n    };\n  }\n}\n\nhttp.createServer(async (req, res) => {\n  setCors(res);\n  if (req.method === "OPTIONS") { res.writeHead(204); return res.end(); }\n\n  const url = new URL(req.url, `http://${req.headers.host}`);\n\n  try {\n    if (req.method === "GET" && url.pathname === "/health") {\n      return sendJson(res, 200, {\n        ok: true,\n        service: "Aurora Stratum Pool Gateway",\n        routes: ["/pool/connect","/pool/status","/pool/work","/pool/submit","/pool/disconnect"],\n        sessions: sessions.size,\n        at: new Date().toISOString()\n      });\n    }\n\n    if (req.method !== "POST") return sendJson(res, 405, { ok:false, error:"POST required" });\n\n    const body = await readBody(req);\n\n    if (url.pathname === "/pool/connect") {\n      const s = new StratumSession(body);\n      sessions.set(s.id, s);\n      await s.connect();\n      return sendJson(res, 200, { ok:true, sessionId:s.id, status:s.status() });\n    }\n\n    if (url.pathname === "/pool/status") {\n      const s = sessions.get(body.sessionId);\n      if (!s) return sendJson(res, 404, { ok:false, error:"Unknown sessionId" });\n      return sendJson(res, 200, { ok:true, status:s.status() });\n    }\n\n    if (url.pathname === "/pool/work") {\n      const s = sessions.get(body.sessionId);\n      if (!s) return sendJson(res, 404, { ok:false, error:"Unknown sessionId" });\n      return sendJson(res, 200, { ok:true, work:s.getWork() });\n    }\n\n    if (url.pathname === "/pool/submit") {\n      const s = sessions.get(body.sessionId);\n      if (!s) return sendJson(res, 404, { ok:false, error:"Unknown sessionId" });\n      return sendJson(res, 200, { ok:true, submit:s.submit(body) });\n    }\n\n    if (url.pathname === "/pool/disconnect") {\n      const s = sessions.get(body.sessionId);\n      if (s) s.close();\n      sessions.delete(body.sessionId);\n      return sendJson(res, 200, { ok:true });\n    }\n\n    return sendJson(res, 404, { ok:false, error:"Unknown route" });\n  } catch (err) {\n    return sendJson(res, 500, { ok:false, error:String(err.message || err) });\n  }\n}).listen(PORT, "127.0.0.1", () => {\n  console.log(`Aurora Stratum Pool Gateway listening on http://127.0.0.1:${PORT}`);\n});\n';
 
+
+function populateStratumGatewayBox(){
+  const box = $("embeddedStratumGatewayCode");
+  if(box && typeof EMBEDDED_STRATUM_GATEWAY_JS !== "undefined"){
+    box.value = EMBEDDED_STRATUM_GATEWAY_JS;
+  }
+}
+
 function renderPoolUi(){
   if($("poolGatewayUrl")) $("poolGatewayUrl").value = state.pool.gatewayUrl || "http://127.0.0.1:8790";
   if($("poolCoin")) $("poolCoin").value = state.pool.coin || "ltc";
@@ -659,6 +726,7 @@ function renderPoolUi(){
   if($("poolSession")) $("poolSession").textContent = state.pool.sessionId ? state.pool.sessionId.slice(0,18)+"…" : "—";
   if($("poolDiff")) $("poolDiff").textContent = state.pool.difficulty ?? "—";
   if($("poolJob")) $("poolJob").textContent = state.pool.lastJobId || "—";
+  populateStratumGatewayBox();
 }
 
 function savePoolConfig(){
@@ -868,6 +936,8 @@ if($("poolStopBtn")) $("poolStopBtn").onclick=stopPoolMining;
 
 loadSafe();
 render();
+renderPoolUi();
+populateStratumGatewayBox();
 </script>
 </body>
 </html>
