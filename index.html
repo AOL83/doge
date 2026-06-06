@@ -86,6 +86,7 @@ button{cursor:pointer;width:auto;min-width:132px;font-weight:800}
   font-size:.76rem;
   margin:4px 6px 0 0;
 }
+.codebox{width:100%;min-height:220px;background:#010409;border:1px solid rgba(74,222,128,.35);border-radius:16px;padding:12px;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:.75rem;white-space:pre;overflow:auto;color:#d1fae5}
 </style>
 </head>
 <body>
@@ -100,16 +101,40 @@ button{cursor:pointer;width:auto;min-width:132px;font-weight:800}
       <span class="pill">Web Workers</span>
       <span class="pill">Solo / regtest-first</span>
     </p>
-    <p class="small warn"><strong>Testing note:</strong> Use regtest/testnet first. Browser RPC calls may need your node RPC to allow the page origin, or you can open the file locally with a browser that permits local testing. Mainnet solo odds are lottery-level.</p>
+    <p class="small warn"><strong>Testing note:</strong> Use regtest/testnet first. This build uses the local Aurora Scrypt Gateway and a pure-JavaScript scrypt_1024_1_1_256 worker path. Mainnet solo odds are lottery-level and browser Scrypt is slow compared with ASICs.</p>
   </section>
 
-  <section class="grid">
+  <section class="card">
+<h2>🌉 Local CORS Gateway</h2>
+<p class="small">GitHub Pages cannot directly fetch Litecoin/Dogecoin Core RPC. This build now talks to a local gateway instead.</p>
+<p class="small"><strong>LTC endpoint:</strong> http://127.0.0.1:8788/ltc<br><strong>DOGE endpoint:</strong> http://127.0.0.1:8788/doge</p>
+<div class="btn-row">
+<button class="ghost" id="downloadGatewayBtn">Download aurora-scrypt-gateway.js</button>
+<button class="ghost" id="downloadEnvBtn">Download gateway env example</button>
+<button class="ghost" id="downloadLtcConfBtn">Download litecoin.conf</button>
+<button class="ghost" id="downloadDogeConfBtn">Download dogecoin.conf</button>
+</div>
+<p class="small">Run the gateway with: <code>node aurora-scrypt-gateway.js</code></p>
+<textarea class="codebox" readonly>#!/usr/bin/env node
+const http=require(&quot;http&quot;);const {URL}=require(&quot;url&quot;);
+const PORT=Number(process.env.PORT||8788);
+const CFG={ltc:{url:process.env.LTC_RPC_URL||&quot;http://127.0.0.1:9332&quot;,user:process.env.LTC_RPC_USER||&quot;rpcuser&quot;,pass:process.env.LTC_RPC_PASS||&quot;rpcpassword&quot;},doge:{url:process.env.DOGE_RPC_URL||&quot;http://127.0.0.1:22555&quot;,user:process.env.DOGE_RPC_USER||&quot;rpcuser&quot;,pass:process.env.DOGE_RPC_PASS||&quot;rpcpassword&quot;}};
+function cors(res){res.setHeader(&quot;Access-Control-Allow-Origin&quot;,&quot;*&quot;);res.setHeader(&quot;Access-Control-Allow-Methods&quot;,&quot;GET,POST,OPTIONS&quot;);res.setHeader(&quot;Access-Control-Allow-Headers&quot;,&quot;Content-Type,Authorization&quot;)}
+function send(res,s,o){const b=JSON.stringify(o,null,2);res.writeHead(s,{&quot;Content-Type&quot;:&quot;application/json&quot;,&quot;Content-Length&quot;:Buffer.byteLength(b)});res.end(b)}
+function body(req){return new Promise((ok,fail)=&gt;{let d=&quot;&quot;;req.on(&quot;data&quot;,c=&gt;d+=c);req.on(&quot;end&quot;,()=&gt;{try{ok(d?JSON.parse(d):{})}catch(e){fail(e)}});req.on(&quot;error&quot;,fail)})}
+function rpc(coin,method,params){return new Promise((ok,fail)=&gt;{const c=CFG[coin],u=new URL(c.url),b=JSON.stringify({jsonrpc:&quot;1.0&quot;,id:`aurora-${coin}-${Date.now()}`,method,params});const r=http.request({hostname:u.hostname,port:u.port||80,path:u.pathname||&quot;/&quot;,method:&quot;POST&quot;,headers:{&quot;Content-Type&quot;:&quot;application/json&quot;,&quot;Content-Length&quot;:Buffer.byteLength(b),&quot;Authorization&quot;:&quot;Basic &quot;+Buffer.from(c.user+&quot;:&quot;+c.pass).toString(&quot;base64&quot;)},timeout:30000},res=&gt;{let chunks=&quot;&quot;;res.on(&quot;data&quot;,x=&gt;chunks+=x);res.on(&quot;end&quot;,()=&gt;{try{ok(JSON.parse(chunks))}catch(e){fail(new Error(&quot;RPC non-JSON &quot;+chunks.slice(0,180)))}})});r.on(&quot;timeout&quot;,()=&gt;r.destroy(new Error(&quot;RPC timeout&quot;)));r.on(&quot;error&quot;,fail);r.write(b);r.end()})}
+http.createServer(async(req,res)=&gt;{cors(res);if(req.method===&quot;OPTIONS&quot;){res.writeHead(204);return res.end()}const u=new URL(req.url,`http://${req.headers.host}`);if(req.method===&quot;GET&quot;&amp;&amp;u.pathname===&quot;/health&quot;)return send(res,200,{ok:true,service:&quot;Aurora Scrypt Gateway&quot;,routes:[&quot;/ltc&quot;,&quot;/doge&quot;],ltc:CFG.ltc.url,doge:CFG.doge.url});
+const coin=u.pathname.slice(1);if(![&quot;ltc&quot;,&quot;doge&quot;].includes(coin))return send(res,404,{ok:false,error:&quot;use /ltc or /doge&quot;});if(req.method!==&quot;POST&quot;)return send(res,405,{ok:false,error:&quot;POST required&quot;});
+try{const j=await body(req);const allowed=new Set([&quot;getblockchaininfo&quot;,&quot;getnetworkinfo&quot;,&quot;getmininginfo&quot;,&quot;getblocktemplate&quot;,&quot;submitblock&quot;]);if(!allowed.has(j.method))return send(res,400,{jsonrpc:&quot;2.0&quot;,id:j.id||null,result:null,error:{code:-32601,message:&quot;method blocked by gateway&quot;}});send(res,200,await rpc(coin,j.method,Array.isArray(j.params)?j.params:[]))}catch(e){send(res,500,{jsonrpc:&quot;2.0&quot;,id:null,result:null,error:{code:-32000,message:String(e.message||e)}})}
+}).listen(PORT,&quot;127.0.0.1&quot;,()=&gt;console.log(&quot;Aurora Scrypt Gateway: http://127.0.0.1:&quot;+PORT));</textarea>
+</section>
+<section class="grid">
     <div class="card span-6">
       <h2>Litecoin Solo RPC</h2>
       <div class="row">
         <div>
           <label>LTC RPC URL</label>
-          <input id="ltcRpcUrl" value="http://127.0.0.1:9332" />
+          <input id="ltcRpcUrl" value="http://127.0.0.1:8788/ltc" />
         </div>
         <div>
           <label>Network</label>
@@ -160,7 +185,7 @@ button{cursor:pointer;width:auto;min-width:132px;font-weight:800}
       <div class="row">
         <div>
           <label>DOGE RPC URL</label>
-          <input id="dogeRpcUrl" value="http://127.0.0.1:22555" />
+          <input id="dogeRpcUrl" value="http://127.0.0.1:8788/doge" />
         </div>
         <div>
           <label>Network</label>
@@ -255,8 +280,8 @@ const state = {
   audit:[],
   workers:[],
   coins:{
-    ltc:{ rpcUrl:"http://127.0.0.1:9332", rpcUser:"", rpcPass:"", network:"regtest", payout:"", chain:null, height:null, template:null, work:null },
-    doge:{ rpcUrl:"http://127.0.0.1:22555", rpcUser:"", rpcPass:"", network:"regtest", payout:"", chain:null, height:null, template:null, work:null }
+    ltc:{ rpcUrl:"http://127.0.0.1:8788/ltc", rpcUser:"", rpcPass:"", network:"regtest", payout:"", chain:null, height:null, template:null, work:null },
+    doge:{ rpcUrl:"http://127.0.0.1:8788/doge", rpcUser:"", rpcPass:"", network:"regtest", payout:"", chain:null, height:null, template:null, work:null }
   }
 };
 
@@ -390,7 +415,7 @@ function scriptPubKeyDev(coin,payout){
   }
   // Minimal placeholder: OP_RETURN-style marker for audit/dev. Real use needs scriptPubKey decode for the address type.
   // Keep block-building path visible without pretending unsupported address decoding is complete.
-  audit(coin,"payout_script_placeholder",{payout,warning:"Address-to-script decoder placeholder; for real submitblock, implement valid scriptPubKey for this chain/address."});
+  audit(coin,"payout_script_placeholder",{payout,warning:"Scrypt hashing is real now; address-to-scriptPubKey decoding still needs implementation for accepted mainnet submitblock."});
   return "51";
 }
 
@@ -471,64 +496,25 @@ async function pullTemplate(coin){
 
 function workerSource(){
 return `
-let running=false, work=null, workerIndex=0, workerCount=1, nonce=0;
-
-const hexToBytes = (hex)=>new Uint8Array(hex.match(/.{1,2}/g).map(b=>parseInt(b,16)));
-const bytesToHex = (bytes)=>[...bytes].map(b=>b.toString(16).padStart(2,"0")).join("");
-const reverseHex = (hex)=>hex.match(/.{1,2}/g).reverse().join("");
-function u32le(n){const b=new Uint8Array(4);new DataView(b.buffer).setUint32(0,n>>>0,true);return bytesToHex(b);}
-
-async function sha256Hex(hex){
-  const h = await crypto.subtle.digest("SHA-256", hexToBytes(hex));
-  return bytesToHex(new Uint8Array(h));
-}
-
-/*
-  Browser-safe Scrypt-style placeholder:
-  A real Scrypt block hash requires native Scrypt parameters used by LTC/DOGE.
-  This keeps one-page worker structure testable without external libraries.
-  Replace this function with a full JS/WASM scrypt_1024_1_1_256 implementation for real header comparison.
-*/
-async function scryptStyleHeaderHash(headerHex){
-  let h = headerHex;
-  for(let i=0;i<128;i++){
-    h = await sha256Hex(h + bytesToHex(new TextEncoder().encode("|aurora-scrypt-round|" + i)));
-  }
-  return h.slice(0,64);
-}
-
-function meetsTarget(hashInternal,targetHex){
-  return BigInt("0x"+reverseHex(hashInternal)) <= BigInt("0x"+targetHex);
-}
-
-async function loop(){
-  while(running && work){
-    const start = performance.now();
-    let hashes=0,lastHash=null,found=[];
-    for(let i=0;i<250;i++){
-      const n = (nonce + workerIndex) >>> 0;
-      nonce = (nonce + workerCount) >>> 0;
-      const headerHex = work.headerPrefixHex + u32le(n);
-      const digestInternal = await scryptStyleHeaderHash(headerHex);
-      const displayHash = reverseHex(digestInternal);
-      lastHash = displayHash;
-      hashes++;
-      if(meetsTarget(digestInternal,work.targetHex)){
-        found.push({nonce:n,hash:displayHash,headerHex});
-      }
-      if(i % 25 === 0) await new Promise(r=>setTimeout(r,0));
-    }
-    const elapsed = Math.max((performance.now()-start)/1000,0.0001);
-    postMessage({type:"batch",payload:{hashes,lastHash,found,hashRate:hashes/elapsed}});
-    await new Promise(r=>setTimeout(r,0));
-  }
-}
-
-onmessage = (event)=>{
-  const {type,payload}=event.data||{};
-  if(type==="start"){ work=payload.work; workerIndex=payload.workerIndex; workerCount=payload.workerCount; nonce=payload.startNonce>>>0; running=true; loop(); }
-  if(type==="stop"){ running=false; }
-};
+let running=false,work=null,workerIndex=0,workerCount=1,nonce=0;
+const hexToBytes=h=>new Uint8Array(h.match(/.{1,2}/g).map(x=>parseInt(x,16)));
+const bytesToHex=b=>[...b].map(x=>x.toString(16).padStart(2,"0")).join("");
+const reverseHex=h=>h.match(/.{1,2}/g).reverse().join("");
+function u32le(n){const b=new Uint8Array(4);new DataView(b.buffer).setUint32(0,n>>>0,true);return bytesToHex(b)}
+function R(x,n){return (x>>>n)|(x<<(32-n))}function A(){let r=0;for(let x of arguments)r=(r+x)>>>0;return r}
+function sha256(bytes){const K=[1116352408,1899447441,3049323471,3921009573,961987163,1508970993,2453635748,2870763221,3624381080,310598401,607225278,1426881987,1925078388,2162078206,2614888103,3248222580,3835390401,4022224774,264347078,604807628,770255983,1249150122,1555081692,1996064986,2554220882,2821834349,2952996808,3210313671,3336571891,3584528711,113926993,338241895,666307205,773529912,1294757372,1396182291,1695183700,1986661051,2177026350,2456956037,2730485921,2820302411,3259730800,3345764771,3516065817,3600352804,4094571909,275423344,430227734,506948616,659060556,883997877,958139571,1322822218,1537002063,1747873779,1955562222,2024104815,2227730452,2361852424,2428436474,2756734187,3204031479,3329325298];let H=[1779033703,3144134277,1013904242,2773480762,1359893119,2600822924,528734635,1541459225];let l=bytes.length,z=(64-((l+1+8)%64))%64,m=new Uint8Array(l+1+z+8);m.set(bytes);m[l]=128;let dv=new DataView(m.buffer);dv.setUint32(m.length-4,(l*8)>>>0,false);let W=new Uint32Array(64);for(let o=0;o<m.length;o+=64){for(let i=0;i<16;i++)W[i]=dv.getUint32(o+i*4,false);for(let i=16;i<64;i++){let s0=R(W[i-15],7)^R(W[i-15],18)^(W[i-15]>>>3),s1=R(W[i-2],17)^R(W[i-2],19)^(W[i-2]>>>10);W[i]=A(W[i-16],s0,W[i-7],s1)}let[a,b,c,d,e,f,g,h]=H;for(let i=0;i<64;i++){let S1=R(e,6)^R(e,11)^R(e,25),ch=(e&f)^(~e&g),t1=A(h,S1,ch,K[i],W[i]),S0=R(a,2)^R(a,13)^R(a,22),maj=(a&b)^(a&c)^(b&c),t2=A(S0,maj);h=g;g=f;f=e;e=A(d,t1);d=c;c=b;b=a;a=A(t1,t2)}H=[A(H[0],a),A(H[1],b),A(H[2],c),A(H[3],d),A(H[4],e),A(H[5],f),A(H[6],g),A(H[7],h)]}let out=new Uint8Array(32),od=new DataView(out.buffer);for(let i=0;i<8;i++)od.setUint32(i*4,H[i],false);return out}
+function hmac(k,msg){if(k.length>64)k=sha256(k);let kk=new Uint8Array(64);kk.set(k);let o=new Uint8Array(64),ii=new Uint8Array(64);for(let x=0;x<64;x++){o[x]=kk[x]^92;ii[x]=kk[x]^54}let inner=new Uint8Array(64+msg.length);inner.set(ii);inner.set(msg,64);let ih=sha256(inner),outer=new Uint8Array(96);outer.set(o);outer.set(ih,64);return sha256(outer)}
+function pbkdf1(p,s,dk){let out=new Uint8Array(dk),blocks=Math.ceil(dk/32);for(let b=1;b<=blocks;b++){let m=new Uint8Array(s.length+4);m.set(s);m[s.length]=(b>>>24)&255;m[s.length+1]=(b>>>16)&255;m[s.length+2]=(b>>>8)&255;m[s.length+3]=b&255;out.set(hmac(p,m).slice(0,Math.min(32,dk-(b-1)*32)),(b-1)*32)}return out}
+function L(x,n){return ((x<<n)|(x>>>(32-n)))>>>0}
+function salsa(B){let x=Array.from(B);for(let r=0;r<8;r+=2){x[4]^=L(A(x[0],x[12]),7);x[8]^=L(A(x[4],x[0]),9);x[12]^=L(A(x[8],x[4]),13);x[0]^=L(A(x[12],x[8]),18);x[9]^=L(A(x[5],x[1]),7);x[13]^=L(A(x[9],x[5]),9);x[1]^=L(A(x[13],x[9]),13);x[5]^=L(A(x[1],x[13]),18);x[14]^=L(A(x[10],x[6]),7);x[2]^=L(A(x[14],x[10]),9);x[6]^=L(A(x[2],x[14]),13);x[10]^=L(A(x[6],x[2]),18);x[3]^=L(A(x[15],x[11]),7);x[7]^=L(A(x[3],x[15]),9);x[11]^=L(A(x[7],x[3]),13);x[15]^=L(A(x[11],x[7]),18);x[1]^=L(A(x[0],x[3]),7);x[2]^=L(A(x[1],x[0]),9);x[3]^=L(A(x[2],x[1]),13);x[0]^=L(A(x[3],x[2]),18);x[6]^=L(A(x[5],x[4]),7);x[7]^=L(A(x[6],x[5]),9);x[4]^=L(A(x[7],x[6]),13);x[5]^=L(A(x[4],x[7]),18);x[11]^=L(A(x[10],x[9]),7);x[8]^=L(A(x[11],x[10]),9);x[9]^=L(A(x[8],x[11]),13);x[10]^=L(A(x[9],x[8]),18);x[12]^=L(A(x[15],x[14]),7);x[13]^=L(A(x[12],x[15]),9);x[14]^=L(A(x[13],x[12]),13);x[15]^=L(A(x[14],x[13]),18)}for(let i=0;i<16;i++)B[i]=A(B[i],x[i])}
+function blockmix(BY){let X=new Uint32Array(16),dv=new DataView(BY.buffer,BY.byteOffset,BY.byteLength);for(let i=0;i<16;i++)X[i]=dv.getUint32(64+i*4,true);let out=new Uint8Array(128);for(let bl=0;bl<2;bl++){for(let i=0;i<16;i++)X[i]^=dv.getUint32(bl*64+i*4,true);salsa(X);let od=new DataView(out.buffer,bl*64,64);for(let i=0;i<16;i++)od.setUint32(i*4,X[i],true)}return out}
+function intify(B){return new DataView(B.buffer,B.byteOffset,B.byteLength).getUint32(64,true)}
+function xor(a,b){let o=new Uint8Array(a.length);for(let i=0;i<a.length;i++)o[i]=a[i]^b[i];return o}
+function scrypt1024(input){let X=pbkdf1(input,input,128),V=new Array(1024);for(let i=0;i<1024;i++){V[i]=X.slice();X=blockmix(X)}for(let i=0;i<1024;i++)X=blockmix(xor(X,V[intify(X)&1023]));return pbkdf1(input,X,32)}
+function scryptHeaderHash(h){return bytesToHex(scrypt1024(hexToBytes(h)))}
+function meetsTarget(hashInternal,targetHex){return BigInt("0x"+reverseHex(hashInternal))<=BigInt("0x"+targetHex)}
+async function loop(){while(running&&work){let st=performance.now(),hashes=0,lastHash=null,found=[];for(let i=0;i<1;i++){let n=(nonce+workerIndex)>>>0;nonce=(nonce+workerCount)>>>0;let headerHex=work.headerPrefixHex+u32le(n),dig=scryptHeaderHash(headerHex),disp=reverseHex(dig);lastHash=disp;hashes++;if(meetsTarget(dig,work.targetHex))found.push({nonce:n,hash:disp,headerHex})}postMessage({type:"batch",payload:{hashes,lastHash,found,hashRate:hashes/Math.max((performance.now()-st)/1000,0.0001)}});await new Promise(r=>setTimeout(r,0))}}
+onmessage=e=>{const{type,payload}=e.data||{};if(type==="start"){work=payload.work;workerIndex=payload.workerIndex;workerCount=payload.workerCount;nonce=payload.startNonce>>>0;running=true;loop()}if(type==="stop")running=false};
 `;
 }
 
@@ -671,6 +657,17 @@ $("clearBtn").onclick=()=>{state.audit=[];saveSafe();renderLog();};
 $("exportBtn").onclick=exportAudit;
 $("manualLtcBtn").onclick=()=>manualBuild("ltc");
 $("manualDogeBtn").onclick=()=>manualBuild("doge");
+
+
+const EMBEDDED_GATEWAY_JS='#!/usr/bin/env node\nconst http=require("http");const {URL}=require("url");\nconst PORT=Number(process.env.PORT||8788);\nconst CFG={ltc:{url:process.env.LTC_RPC_URL||"http://127.0.0.1:9332",user:process.env.LTC_RPC_USER||"rpcuser",pass:process.env.LTC_RPC_PASS||"rpcpassword"},doge:{url:process.env.DOGE_RPC_URL||"http://127.0.0.1:22555",user:process.env.DOGE_RPC_USER||"rpcuser",pass:process.env.DOGE_RPC_PASS||"rpcpassword"}};\nfunction cors(res){res.setHeader("Access-Control-Allow-Origin","*");res.setHeader("Access-Control-Allow-Methods","GET,POST,OPTIONS");res.setHeader("Access-Control-Allow-Headers","Content-Type,Authorization")}\nfunction send(res,s,o){const b=JSON.stringify(o,null,2);res.writeHead(s,{"Content-Type":"application/json","Content-Length":Buffer.byteLength(b)});res.end(b)}\nfunction body(req){return new Promise((ok,fail)=>{let d="";req.on("data",c=>d+=c);req.on("end",()=>{try{ok(d?JSON.parse(d):{})}catch(e){fail(e)}});req.on("error",fail)})}\nfunction rpc(coin,method,params){return new Promise((ok,fail)=>{const c=CFG[coin],u=new URL(c.url),b=JSON.stringify({jsonrpc:"1.0",id:`aurora-${coin}-${Date.now()}`,method,params});const r=http.request({hostname:u.hostname,port:u.port||80,path:u.pathname||"/",method:"POST",headers:{"Content-Type":"application/json","Content-Length":Buffer.byteLength(b),"Authorization":"Basic "+Buffer.from(c.user+":"+c.pass).toString("base64")},timeout:30000},res=>{let chunks="";res.on("data",x=>chunks+=x);res.on("end",()=>{try{ok(JSON.parse(chunks))}catch(e){fail(new Error("RPC non-JSON "+chunks.slice(0,180)))}})});r.on("timeout",()=>r.destroy(new Error("RPC timeout")));r.on("error",fail);r.write(b);r.end()})}\nhttp.createServer(async(req,res)=>{cors(res);if(req.method==="OPTIONS"){res.writeHead(204);return res.end()}const u=new URL(req.url,`http://${req.headers.host}`);if(req.method==="GET"&&u.pathname==="/health")return send(res,200,{ok:true,service:"Aurora Scrypt Gateway",routes:["/ltc","/doge"],ltc:CFG.ltc.url,doge:CFG.doge.url});\nconst coin=u.pathname.slice(1);if(!["ltc","doge"].includes(coin))return send(res,404,{ok:false,error:"use /ltc or /doge"});if(req.method!=="POST")return send(res,405,{ok:false,error:"POST required"});\ntry{const j=await body(req);const allowed=new Set(["getblockchaininfo","getnetworkinfo","getmininginfo","getblocktemplate","submitblock"]);if(!allowed.has(j.method))return send(res,400,{jsonrpc:"2.0",id:j.id||null,result:null,error:{code:-32601,message:"method blocked by gateway"}});send(res,200,await rpc(coin,j.method,Array.isArray(j.params)?j.params:[]))}catch(e){send(res,500,{jsonrpc:"2.0",id:null,result:null,error:{code:-32000,message:String(e.message||e)}})}\n}).listen(PORT,"127.0.0.1",()=>console.log("Aurora Scrypt Gateway: http://127.0.0.1:"+PORT));';
+const EMBEDDED_ENV_TXT='PORT=8788\\nLTC_RPC_URL=http://127.0.0.1:9332\\nLTC_RPC_USER=rpcuser\\nLTC_RPC_PASS=rpcpassword\\nDOGE_RPC_URL=http://127.0.0.1:22555\\nDOGE_RPC_USER=rpcuser\\nDOGE_RPC_PASS=rpcpassword\\n';
+const EMBEDDED_LTC_CONF='server=1\\nrpcuser=rpcuser\\nrpcpassword=rpcpassword\\nrpcbind=127.0.0.1\\nrpcallowip=127.0.0.1\\nrpcport=9332\\n';
+const EMBEDDED_DOGE_CONF='server=1\\nrpcuser=rpcuser\\nrpcpassword=rpcpassword\\nrpcbind=127.0.0.1\\nrpcallowip=127.0.0.1\\nrpcport=22555\\n';
+function downloadTextFile(filename,content){const blob=new Blob([content],{type:"text/plain;charset=utf-8"});const url=URL.createObjectURL(blob);const a=document.createElement("a");a.href=url;a.download=filename;a.click();URL.revokeObjectURL(url)}
+$("downloadGatewayBtn").onclick=()=>downloadTextFile("aurora-scrypt-gateway.js",EMBEDDED_GATEWAY_JS);
+$("downloadEnvBtn").onclick=()=>downloadTextFile("aurora-scrypt-gateway.env.example",EMBEDDED_ENV_TXT);
+$("downloadLtcConfBtn").onclick=()=>downloadTextFile("litecoin.conf",EMBEDDED_LTC_CONF);
+$("downloadDogeConfBtn").onclick=()=>downloadTextFile("dogecoin.conf",EMBEDDED_DOGE_CONF);
 
 loadSafe();
 render();
