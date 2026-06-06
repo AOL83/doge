@@ -87,6 +87,10 @@ button{cursor:pointer;width:auto;min-width:132px;font-weight:800}
   margin:4px 6px 0 0;
 }
 .codebox{width:100%;min-height:220px;background:#010409;border:1px solid rgba(74,222,128,.35);border-radius:16px;padding:12px;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:.75rem;white-space:pre;overflow:auto;color:#d1fae5}
+
+.poolgrid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:12px}
+@media(max-width:900px){.poolgrid{grid-template-columns:1fr}}
+
 </style>
 </head>
 <body>
@@ -279,6 +283,18 @@ const state = {
   lastHash:"—",
   audit:[],
   workers:[],
+  pool:{
+    gatewayUrl:"http://127.0.0.1:8790",
+    coin:"ltc",
+    poolUrl:"",
+    workerName:"",
+    workerPass:"x",
+    sessionId:null,
+    difficulty:null,
+    lastJobId:null,
+    work:null,
+    workers:[]
+  },
   coins:{
     ltc:{ rpcUrl:"http://127.0.0.1:8788/ltc", rpcUser:"", rpcPass:"", network:"regtest", payout:"", chain:null, height:null, template:null, work:null },
     doge:{ rpcUrl:"http://127.0.0.1:8788/doge", rpcUser:"", rpcPass:"", network:"regtest", payout:"", chain:null, height:null, template:null, work:null }
@@ -294,6 +310,7 @@ function audit(scope,event,payload={}){
   state.audit = state.audit.slice(0,700);
   saveSafe();
   renderLog();
+  if (typeof renderPoolUi === 'function') renderPoolUi();
 }
 
 function saveSafe(){
@@ -630,6 +647,179 @@ async function manualBuild(coin){
   }
 }
 
+
+const EMBEDDED_STRATUM_GATEWAY_JS = '#!/usr/bin/env node\n/**\n * Aurora LTC + DOGE Stratum Pool Gateway\n * ------------------------------------------------------------\n * Adds pool-mining mode for Aurora browser workers.\n *\n * Browser talks HTTP/WebSocket-style polling to this local gateway.\n * Gateway talks TCP Stratum to a mining pool.\n *\n * Routes:\n *   GET  /health\n *   POST /pool/connect\n *   POST /pool/status\n *   POST /pool/work\n *   POST /pool/submit\n *   POST /pool/disconnect\n *\n * Run:\n *   node aurora-stratum-gateway.js\n *\n * Example pool URL:\n *   stratum+tcp://litecoinpool.org:3333\n */\n\nconst http = require("http");\nconst net = require("net");\nconst { URL } = require("url");\n\nconst PORT = Number(process.env.STRATUM_GATEWAY_PORT || 8790);\n\nconst sessions = new Map();\n\nfunction setCors(res) {\n  res.setHeader("Access-Control-Allow-Origin", "*");\n  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");\n  res.setHeader("Access-Control-Allow-Headers", "Content-Type,Authorization");\n}\n\nfunction sendJson(res, status, obj) {\n  const body = JSON.stringify(obj, null, 2);\n  res.writeHead(status, {"Content-Type":"application/json; charset=utf-8","Content-Length":Buffer.byteLength(body)});\n  res.end(body);\n}\n\nfunction readBody(req) {\n  return new Promise((resolve, reject) => {\n    let data = "";\n    req.on("data", c => data += c);\n    req.on("end", () => {\n      if (!data) return resolve({});\n      try { resolve(JSON.parse(data)); }\n      catch { reject(new Error("Invalid JSON body")); }\n    });\n    req.on("error", reject);\n  });\n}\n\nfunction normalizePoolUrl(raw) {\n  if (!raw) throw new Error("Missing poolUrl");\n  let url = raw.trim();\n  if (url.startsWith("stratum+tcp://")) url = "tcp://" + url.slice("stratum+tcp://".length);\n  if (!url.includes("://")) url = "tcp://" + url;\n  const u = new URL(url);\n  return {\n    host: u.hostname,\n    port: Number(u.port || 3333),\n    display: raw\n  };\n}\n\nfunction makeSessionId() {\n  return "aurora-pool-" + Date.now() + "-" + Math.random().toString(16).slice(2);\n}\n\nclass StratumSession {\n  constructor({ coin, poolUrl, workerName, workerPass }) {\n    this.id = makeSessionId();\n    this.coin = coin || "ltc";\n    this.poolUrl = poolUrl;\n    this.workerName = workerName;\n    this.workerPass = workerPass || "x";\n    this.socket = null;\n    this.buffer = "";\n    this.nextId = 1;\n    this.pending = new Map();\n    this.connected = false;\n    this.authorized = false;\n    this.subscribed = false;\n    this.extranonce1 = null;\n    this.extranonce2Size = 4;\n    this.difficulty = 1;\n    this.jobs = [];\n    this.lastJob = null;\n    this.messages = [];\n    this.accepted = 0;\n    this.rejected = 0;\n  }\n\n  log(event, payload = {}) {\n    const item = { at: new Date().toISOString(), event, ...payload };\n    this.messages.unshift(item);\n    this.messages = this.messages.slice(0, 100);\n  }\n\n  send(method, params = []) {\n    const id = this.nextId++;\n    const msg = { id, method, params };\n    this.socket.write(JSON.stringify(msg) + "\\n");\n    return id;\n  }\n\n  connect() {\n    return new Promise((resolve, reject) => {\n      const p = normalizePoolUrl(this.poolUrl);\n      this.socket = net.createConnection({ host: p.host, port: p.port }, () => {\n        this.connected = true;\n        this.log("tcp_connected", { host: p.host, port: p.port });\n        this.send("mining.subscribe", ["AuroraStratum/0.1"]);\n        this.send("mining.authorize", [this.workerName, this.workerPass]);\n        resolve();\n      });\n\n      this.socket.on("data", chunk => this.onData(chunk));\n      this.socket.on("error", err => {\n        this.log("socket_error", { error: err.message });\n        if (!this.connected) reject(err);\n      });\n      this.socket.on("close", () => {\n        this.connected = false;\n        this.authorized = false;\n        this.log("socket_closed");\n      });\n    });\n  }\n\n  onData(chunk) {\n    this.buffer += chunk.toString("utf8");\n    let idx;\n    while ((idx = this.buffer.indexOf("\\n")) >= 0) {\n      const line = this.buffer.slice(0, idx).trim();\n      this.buffer = this.buffer.slice(idx + 1);\n      if (!line) continue;\n      let msg;\n      try { msg = JSON.parse(line); }\n      catch { this.log("bad_json", { line: line.slice(0, 200) }); continue; }\n      this.handleMessage(msg);\n    }\n  }\n\n  handleMessage(msg) {\n    if (msg.method === "mining.set_difficulty") {\n      this.difficulty = Number(msg.params && msg.params[0] || 1);\n      this.log("set_difficulty", { difficulty: this.difficulty });\n      return;\n    }\n\n    if (msg.method === "mining.notify") {\n      const p = msg.params || [];\n      const job = {\n        jobId: p[0],\n        prevhash: p[1],\n        coinb1: p[2],\n        coinb2: p[3],\n        merkleBranch: p[4] || [],\n        version: p[5],\n        nbits: p[6],\n        ntime: p[7],\n        cleanJobs: !!p[8],\n        difficulty: this.difficulty,\n        extranonce1: this.extranonce1,\n        extranonce2Size: this.extranonce2Size,\n        receivedAt: new Date().toISOString()\n      };\n      if (job.cleanJobs) this.jobs = [];\n      this.jobs.unshift(job);\n      this.jobs = this.jobs.slice(0, 20);\n      this.lastJob = job;\n      this.log("notify", { jobId: job.jobId, difficulty: job.difficulty });\n      return;\n    }\n\n    if (msg.id && Array.isArray(msg.result)) {\n      // subscribe result commonly: [[...], extranonce1, extranonce2_size]\n      if (msg.result.length >= 3 && typeof msg.result[1] === "string") {\n        this.subscribed = true;\n        this.extranonce1 = msg.result[1];\n        this.extranonce2Size = Number(msg.result[2] || 4);\n        this.log("subscribed", { extranonce1: this.extranonce1, extranonce2Size: this.extranonce2Size });\n      }\n    }\n\n    if (msg.id && typeof msg.result === "boolean") {\n      if (msg.result === true && !this.authorized) {\n        this.authorized = true;\n        this.log("authorized", { workerName: this.workerName });\n      } else if (msg.result === true) {\n        this.accepted += 1;\n        this.log("share_accepted", { id: msg.id });\n      } else {\n        this.rejected += 1;\n        this.log("share_rejected", { id: msg.id, error: msg.error });\n      }\n    }\n\n    if (msg.error) {\n      this.rejected += 1;\n      this.log("stratum_error", { id: msg.id, error: msg.error });\n    }\n  }\n\n  getWork() {\n    if (!this.lastJob) throw new Error("No stratum job received yet");\n    return {\n      sessionId: this.id,\n      coin: this.coin,\n      connected: this.connected,\n      authorized: this.authorized,\n      subscribed: this.subscribed,\n      difficulty: this.difficulty,\n      extranonce1: this.extranonce1,\n      extranonce2Size: this.extranonce2Size,\n      job: this.lastJob\n    };\n  }\n\n  submit({ jobId, extranonce2, ntime, nonce }) {\n    if (!this.socket || !this.connected) throw new Error("Not connected");\n    if (!jobId || !extranonce2 || !ntime || !nonce) throw new Error("Missing submit fields");\n    const id = this.send("mining.submit", [this.workerName, jobId, extranonce2, ntime, nonce]);\n    this.log("share_submitted", { id, jobId, extranonce2, ntime, nonce });\n    return { id };\n  }\n\n  close() {\n    if (this.socket) this.socket.destroy();\n    this.connected = false;\n  }\n\n  status() {\n    return {\n      id: this.id,\n      coin: this.coin,\n      poolUrl: this.poolUrl,\n      workerName: this.workerName,\n      connected: this.connected,\n      subscribed: this.subscribed,\n      authorized: this.authorized,\n      difficulty: this.difficulty,\n      extranonce1: this.extranonce1,\n      extranonce2Size: this.extranonce2Size,\n      lastJobId: this.lastJob && this.lastJob.jobId,\n      accepted: this.accepted,\n      rejected: this.rejected,\n      messages: this.messages\n    };\n  }\n}\n\nhttp.createServer(async (req, res) => {\n  setCors(res);\n  if (req.method === "OPTIONS") { res.writeHead(204); return res.end(); }\n\n  const url = new URL(req.url, `http://${req.headers.host}`);\n\n  try {\n    if (req.method === "GET" && url.pathname === "/health") {\n      return sendJson(res, 200, {\n        ok: true,\n        service: "Aurora Stratum Pool Gateway",\n        routes: ["/pool/connect","/pool/status","/pool/work","/pool/submit","/pool/disconnect"],\n        sessions: sessions.size,\n        at: new Date().toISOString()\n      });\n    }\n\n    if (req.method !== "POST") return sendJson(res, 405, { ok:false, error:"POST required" });\n\n    const body = await readBody(req);\n\n    if (url.pathname === "/pool/connect") {\n      const s = new StratumSession(body);\n      sessions.set(s.id, s);\n      await s.connect();\n      return sendJson(res, 200, { ok:true, sessionId:s.id, status:s.status() });\n    }\n\n    if (url.pathname === "/pool/status") {\n      const s = sessions.get(body.sessionId);\n      if (!s) return sendJson(res, 404, { ok:false, error:"Unknown sessionId" });\n      return sendJson(res, 200, { ok:true, status:s.status() });\n    }\n\n    if (url.pathname === "/pool/work") {\n      const s = sessions.get(body.sessionId);\n      if (!s) return sendJson(res, 404, { ok:false, error:"Unknown sessionId" });\n      return sendJson(res, 200, { ok:true, work:s.getWork() });\n    }\n\n    if (url.pathname === "/pool/submit") {\n      const s = sessions.get(body.sessionId);\n      if (!s) return sendJson(res, 404, { ok:false, error:"Unknown sessionId" });\n      return sendJson(res, 200, { ok:true, submit:s.submit(body) });\n    }\n\n    if (url.pathname === "/pool/disconnect") {\n      const s = sessions.get(body.sessionId);\n      if (s) s.close();\n      sessions.delete(body.sessionId);\n      return sendJson(res, 200, { ok:true });\n    }\n\n    return sendJson(res, 404, { ok:false, error:"Unknown route" });\n  } catch (err) {\n    return sendJson(res, 500, { ok:false, error:String(err.message || err) });\n  }\n}).listen(PORT, "127.0.0.1", () => {\n  console.log(`Aurora Stratum Pool Gateway listening on http://127.0.0.1:${PORT}`);\n});\n';
+
+function renderPoolUi(){
+  if($("poolGatewayUrl")) $("poolGatewayUrl").value = state.pool.gatewayUrl || "http://127.0.0.1:8790";
+  if($("poolCoin")) $("poolCoin").value = state.pool.coin || "ltc";
+  if($("poolUrl")) $("poolUrl").value = state.pool.poolUrl || "";
+  if($("poolWorker")) $("poolWorker").value = state.pool.workerName || "";
+  if($("poolPass")) $("poolPass").value = state.pool.workerPass || "x";
+  if($("poolSession")) $("poolSession").textContent = state.pool.sessionId ? state.pool.sessionId.slice(0,18)+"…" : "—";
+  if($("poolDiff")) $("poolDiff").textContent = state.pool.difficulty ?? "—";
+  if($("poolJob")) $("poolJob").textContent = state.pool.lastJobId || "—";
+}
+
+function savePoolConfig(){
+  state.pool.gatewayUrl = $("poolGatewayUrl").value.trim().replace(/\/$/,"");
+  state.pool.coin = $("poolCoin").value;
+  state.pool.poolUrl = $("poolUrl").value.trim();
+  state.pool.workerName = $("poolWorker").value.trim();
+  state.pool.workerPass = $("poolPass").value || "x";
+  saveSafe();
+  renderPoolUi();
+}
+
+async function poolGateway(route, payload={}){
+  savePoolConfig();
+  const res = await fetch(state.pool.gatewayUrl + route, {
+    method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body:JSON.stringify(payload)
+  });
+  const json = await res.json();
+  if(!json.ok) throw new Error(json.error || JSON.stringify(json));
+  return json;
+}
+
+async function connectPool(){
+  savePoolConfig();
+  const json = await poolGateway("/pool/connect", {
+    coin: state.pool.coin,
+    poolUrl: state.pool.poolUrl,
+    workerName: state.pool.workerName,
+    workerPass: state.pool.workerPass
+  });
+  state.pool.sessionId = json.sessionId;
+  state.pool.difficulty = json.status.difficulty;
+  state.pool.lastJobId = json.status.lastJobId || "waiting";
+  audit("pool","connected",{coin:state.pool.coin,poolUrl:state.pool.poolUrl,workerName:state.pool.workerName,sessionId:state.pool.sessionId});
+  saveSafe();
+  renderPoolUi();
+}
+
+async function poolStatus(){
+  if(!state.pool.sessionId) throw new Error("No pool session. Connect first.");
+  const json = await poolGateway("/pool/status", {sessionId:state.pool.sessionId});
+  state.pool.difficulty = json.status.difficulty;
+  state.pool.lastJobId = json.status.lastJobId || "waiting";
+  audit("pool","status",json.status);
+  saveSafe();
+  renderPoolUi();
+}
+
+async function getPoolWork(){
+  if(!state.pool.sessionId) await connectPool();
+  const json = await poolGateway("/pool/work", {sessionId:state.pool.sessionId});
+  const w = json.work;
+  state.pool.difficulty = w.difficulty;
+  state.pool.lastJobId = w.job.jobId;
+  state.pool.work = w;
+  audit("pool","work_ready",{coin:w.coin,jobId:w.job.jobId,difficulty:w.difficulty,extranonce1:w.extranonce1});
+  saveSafe();
+  renderPoolUi();
+  return w;
+}
+
+function stopPoolMining(){
+  for(const w of state.pool.workers || []){
+    try{ w.postMessage({type:"stop"}); w.terminate(); }catch{}
+  }
+  state.pool.workers = [];
+  if(state.pool.sessionId){
+    poolGateway("/pool/disconnect",{sessionId:state.pool.sessionId}).catch(()=>{});
+  }
+  state.pool.sessionId = null;
+  state.pool.work = null;
+  audit("pool","stopped");
+  renderPoolUi();
+}
+
+function poolWorkerSource(){
+return `
+let running=false, work=null, workerIndex=0, workerCount=1, extranonceCounter=0;
+
+const hexToBytes=(hex)=>new Uint8Array(hex.match(/.{1,2}/g).map(b=>parseInt(b,16)));
+const bytesToHex=(bytes)=>[...bytes].map(b=>b.toString(16).padStart(2,"0")).join("");
+const reverseHex=(hex)=>hex.match(/.{1,2}/g).reverse().join("");
+function u32le(n){const b=new Uint8Array(4);new DataView(b.buffer).setUint32(0,n>>>0,true);return bytesToHex(b);}
+function rotr(x,n){return (x>>>n)|(x<<(32-n));}
+function add(){let r=0;for(let i=0;i<arguments.length;i++)r=(r+arguments[i])>>>0;return r;}
+
+// compact SHA256/HMAC/PBKDF2/Scrypt intentionally reused from solo worker idea
+function sha256(bytes){
+const K=new Uint32Array([0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2]);
+let H=new Uint32Array([0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19]);
+const bitLenHi=Math.floor(bytes.length/0x20000000),bitLenLo=(bytes.length<<3)>>>0;
+const withOne=bytes.length+1,zeroPad=(64-((withOne+8)%64))%64,msg=new Uint8Array(withOne+zeroPad+8);
+msg.set(bytes);msg[bytes.length]=0x80;const dv=new DataView(msg.buffer);dv.setUint32(msg.length-8,bitLenHi,false);dv.setUint32(msg.length-4,bitLenLo,false);
+const W=new Uint32Array(64);
+for(let off=0;off<msg.length;off+=64){for(let i=0;i<16;i++)W[i]=dv.getUint32(off+i*4,false);for(let i=16;i<64;i++){const s0=rotr(W[i-15],7)^rotr(W[i-15],18)^(W[i-15]>>>3);const s1=rotr(W[i-2],17)^rotr(W[i-2],19)^(W[i-2]>>>10);W[i]=add(W[i-16],s0,W[i-7],s1);}let a=H[0],b=H[1],c=H[2],d=H[3],e=H[4],f=H[5],g=H[6],h=H[7];for(let i=0;i<64;i++){const S1=rotr(e,6)^rotr(e,11)^rotr(e,25);const ch=(e&f)^(~e&g);const t1=add(h,S1,ch,K[i],W[i]);const S0=rotr(a,2)^rotr(a,13)^rotr(a,22);const maj=(a&b)^(a&c)^(b&c);const t2=add(S0,maj);h=g;g=f;f=e;e=add(d,t1);d=c;c=b;b=a;a=add(t1,t2);}H[0]=add(H[0],a);H[1]=add(H[1],b);H[2]=add(H[2],c);H[3]=add(H[3],d);H[4]=add(H[4],e);H[5]=add(H[5],f);H[6]=add(H[6],g);H[7]=add(H[7],h);}
+const out=new Uint8Array(32),od=new DataView(out.buffer);for(let i=0;i<8;i++)od.setUint32(i*4,H[i],false);return out;}
+function hmacSha256(key,msg){if(key.length>64)key=sha256(key);const k=new Uint8Array(64);k.set(key);const o=new Uint8Array(64),ii=new Uint8Array(64);for(let x=0;x<64;x++){o[x]=k[x]^0x5c;ii[x]=k[x]^0x36;}const inner=new Uint8Array(64+msg.length);inner.set(ii);inner.set(msg,64);const ih=sha256(inner);const outer=new Uint8Array(96);outer.set(o);outer.set(ih,64);return sha256(outer);}
+function pbkdf2(password,salt,dkLen){const blocks=Math.ceil(dkLen/32),out=new Uint8Array(dkLen);for(let b=1;b<=blocks;b++){const msg=new Uint8Array(salt.length+4);msg.set(salt);msg[salt.length]=(b>>>24)&255;msg[salt.length+1]=(b>>>16)&255;msg[salt.length+2]=(b>>>8)&255;msg[salt.length+3]=b&255;const u=hmacSha256(password,msg);out.set(u.slice(0,Math.min(32,dkLen-(b-1)*32)),(b-1)*32);}return out;}
+function rotl32(x,n){return ((x<<n)|(x>>>(32-n)))>>>0;}
+function salsa208(B){const x=B.slice();for(let i=0;i<8;i+=2){x[4]^=rotl32(add(x[0],x[12]),7);x[8]^=rotl32(add(x[4],x[0]),9);x[12]^=rotl32(add(x[8],x[4]),13);x[0]^=rotl32(add(x[12],x[8]),18);x[9]^=rotl32(add(x[5],x[1]),7);x[13]^=rotl32(add(x[9],x[5]),9);x[1]^=rotl32(add(x[13],x[9]),13);x[5]^=rotl32(add(x[1],x[13]),18);x[14]^=rotl32(add(x[10],x[6]),7);x[2]^=rotl32(add(x[14],x[10]),9);x[6]^=rotl32(add(x[2],x[14]),13);x[10]^=rotl32(add(x[6],x[2]),18);x[3]^=rotl32(add(x[15],x[11]),7);x[7]^=rotl32(add(x[3],x[15]),9);x[11]^=rotl32(add(x[7],x[3]),13);x[15]^=rotl32(add(x[11],x[7]),18);x[1]^=rotl32(add(x[0],x[3]),7);x[2]^=rotl32(add(x[1],x[0]),9);x[3]^=rotl32(add(x[2],x[1]),13);x[0]^=rotl32(add(x[3],x[2]),18);x[6]^=rotl32(add(x[5],x[4]),7);x[7]^=rotl32(add(x[6],x[5]),9);x[4]^=rotl32(add(x[7],x[6]),13);x[5]^=rotl32(add(x[4],x[7]),18);x[11]^=rotl32(add(x[10],x[9]),7);x[8]^=rotl32(add(x[11],x[10]),9);x[9]^=rotl32(add(x[8],x[11]),13);x[10]^=rotl32(add(x[9],x[8]),18);x[12]^=rotl32(add(x[15],x[14]),7);x[13]^=rotl32(add(x[12],x[15]),9);x[14]^=rotl32(add(x[13],x[12]),13);x[15]^=rotl32(add(x[14],x[13]),18);}for(let i=0;i<16;i++)B[i]=add(B[i],x[i]);}
+function blockMix(BY){const X=new Uint32Array(16),out=new Uint8Array(128),dv=new DataView(BY.buffer,BY.byteOffset,BY.byteLength);for(let i=0;i<16;i++)X[i]=dv.getUint32(64+i*4,true);const Y0=new Uint8Array(64),Y1=new Uint8Array(64);for(let block=0;block<2;block++){const start=block*64;for(let i=0;i<16;i++)X[i]^=dv.getUint32(start+i*4,true);salsa208(X);const target=block===0?Y0:Y1,tdv=new DataView(target.buffer);for(let i=0;i<16;i++)tdv.setUint32(i*4,X[i],true);}out.set(Y0,0);out.set(Y1,64);return out;}
+function integerify(B){return new DataView(B.buffer,B.byteOffset,B.byteLength).getUint32(64,true);}
+function xorInto(a,b){const out=new Uint8Array(a.length);for(let i=0;i<a.length;i++)out[i]=a[i]^b[i];return out;}
+function scryptHash(inputBytes){const N=1024;let X=pbkdf2(inputBytes,inputBytes,128);const V=new Array(N);for(let i=0;i<N;i++){V[i]=X.slice();X=blockMix(X);}for(let i=0;i<N;i++){const j=integerify(X)&(N-1);X=blockMix(xorInto(X,V[j]));}return pbkdf2(inputBytes,X,32);}
+function targetFromDifficulty(diff){const maxTarget=BigInt("0x0000ffff00000000000000000000000000000000000000000000000000000000");return maxTarget/BigInt(Math.max(1,Math.floor(diff||1)));}
+function meetsShare(hashInternal,diff){return BigInt("0x"+reverseHex(hashInternal)) <= targetFromDifficulty(diff);}
+
+function merklePair(a,b){return bytesToHex(sha256(sha256(hexToBytes(a+b))));}
+function merkleRoot(coinbaseHash, branch){let root=coinbaseHash;for(const b of branch)root=merklePair(root,b);return root;}
+function makeExtranonce2(size,counter){let hex=counter.toString(16).padStart(size*2,"0");return hex.slice(-size*2);}
+
+function makeHeader(job, extranonce2, nonceHex){const coinbase=job.coinb1+job.extranonce1+extranonce2+job.coinb2;const coinbaseHash=bytesToHex(sha256(sha256(hexToBytes(coinbase))));const merkle=merkleRoot(coinbaseHash,job.merkleBranch);return job.version+job.prevhash+merkle+job.ntime+job.nbits+nonceHex;}
+
+async function loop(){while(running&&work){const start=performance.now();let hashes=0,lastHash=null,found=[];for(let i=0;i<1;i++){const job=work.job;const ex2=makeExtranonce2(work.extranonce2Size,extranonceCounter+workerIndex);extranonceCounter+=workerCount;const nonceHex=u32le(extranonceCounter>>>0);const headerHex=makeHeader(job,ex2,nonceHex);const digest=scryptHash(hexToBytes(headerHex));const digestHex=bytesToHex(digest);const displayHash=reverseHex(digestHex);lastHash=displayHash;hashes++;if(meetsShare(digestHex,work.difficulty))found.push({jobId:job.jobId,extranonce2:ex2,ntime:job.ntime,nonce:nonceHex,hash:displayHash});}const elapsed=Math.max((performance.now()-start)/1000,.0001);postMessage({type:"pool_batch",payload:{hashes,lastHash,found,hashRate:hashes/elapsed}});await new Promise(r=>setTimeout(r,0));}}
+onmessage=(event)=>{const {type,payload}=event.data||{};if(type==="start"){work=payload.work;workerIndex=payload.workerIndex;workerCount=payload.workerCount;running=true;loop();}if(type==="stop")running=false;};
+`;
+}
+
+async function startPoolMining(){
+  if(!state.pool.sessionId) await connectPool();
+  const work = await getPoolWork();
+  const workers = Math.max(1,Math.min(16,Number($("poolWorkers").value || 4)));
+  state.running=true;
+  state.mode="POOL "+state.pool.coin.toUpperCase();
+  audit("pool","pool_mining_start",{coin:state.pool.coin,workers,jobId:work.job.jobId,difficulty:work.difficulty});
+  const blob=new Blob([poolWorkerSource()],{type:"application/javascript"});
+  const url=URL.createObjectURL(blob);
+  const rates=new Map();
+  state.pool.workers=[];
+  for(let i=0;i<workers;i++){
+    const worker=new Worker(url);
+    worker.onmessage=async(event)=>{
+      const {type,payload}=event.data||{};
+      if(type!=="pool_batch")return;
+      state.hashes += payload.hashes || 0;
+      rates.set(i,payload.hashRate||0);
+      state.rate=[...rates.values()].reduce((a,b)=>a+b,0);
+      state.lastHash=payload.lastHash||state.lastHash;
+      for(const f of payload.found||[]){
+        state.shares += 1;
+        audit("pool","share_found",f);
+        try{
+          const submit=await poolGateway("/pool/submit",{sessionId:state.pool.sessionId,jobId:f.jobId,extranonce2:f.extranonce2,ntime:f.ntime,nonce:f.nonce});
+          audit("pool","share_submitted",submit.submit||submit);
+        }catch(err){
+          audit("pool","share_submit_error",{error:String(err.message||err),share:f});
+        }
+      }
+      saveSafe();
+      render();
+      renderPoolUi();
+    };
+    worker.postMessage({type:"start",payload:{work,workerIndex:i,workerCount:workers}});
+    state.pool.workers.push(worker);
+  }
+  render();
+  renderPoolUi();
+}
+
 function exportAudit(){
   const payload = {exportedAt:now(),status:{mode:state.mode,hashes:state.hashes,rate:state.rate,shares:state.shares,lastHash:state.lastHash},coins:state.coins,audit:state.audit};
   const blob = new Blob([JSON.stringify(payload,null,2)],{type:"application/json"});
@@ -668,6 +858,13 @@ $("downloadGatewayBtn").onclick=()=>downloadTextFile("aurora-scrypt-gateway.js",
 $("downloadEnvBtn").onclick=()=>downloadTextFile("aurora-scrypt-gateway.env.example",EMBEDDED_ENV_TXT);
 $("downloadLtcConfBtn").onclick=()=>downloadTextFile("litecoin.conf",EMBEDDED_LTC_CONF);
 $("downloadDogeConfBtn").onclick=()=>downloadTextFile("dogecoin.conf",EMBEDDED_DOGE_CONF);
+
+
+if($("downloadStratumGatewayBtn")) $("downloadStratumGatewayBtn").onclick=()=>downloadTextFile("aurora-stratum-gateway.js", EMBEDDED_STRATUM_GATEWAY_JS);
+if($("poolConnectBtn")) $("poolConnectBtn").onclick=()=>connectPool().catch(e=>audit("pool","connect_error",{error:String(e.message||e)}));
+if($("poolStatusBtn")) $("poolStatusBtn").onclick=()=>poolStatus().catch(e=>audit("pool","status_error",{error:String(e.message||e)}));
+if($("poolStartBtn")) $("poolStartBtn").onclick=()=>startPoolMining().catch(e=>audit("pool","start_error",{error:String(e.message||e)}));
+if($("poolStopBtn")) $("poolStopBtn").onclick=stopPoolMining;
 
 loadSafe();
 render();
