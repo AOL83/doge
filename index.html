@@ -105,7 +105,7 @@ button{cursor:pointer;width:auto;min-width:132px;font-weight:800}
       <span class="pill">Web Workers</span>
       <span class="pill">Solo / regtest-first</span>
     </p>
-    <p class="small warn"><strong>Testing note:</strong> Use regtest/testnet first. This build uses the local Aurora Scrypt Gateway and a pure-JavaScript scrypt_1024_1_1_256 worker path. Mainnet solo odds are lottery-level and browser Scrypt is slow compared with ASICs.</p>
+    <p class="small warn"><strong>Testing note:</strong> Use regtest/testnet first. This build uses the local Aurora Scrypt Gateway and a pure-JavaScript scrypt_1024_1_1_256 worker path. Mainnet solo odds are lottery-level and browser Scrypt is slow compared with ASICs. This fixed build refuses dev OP_TRUE payouts and now decodes supported LTC/DOGE payout addresses into real scriptPubKey outputs.</p>
   </section>
 
   <section class="card">
@@ -228,6 +228,16 @@ try{const j=await body(req);const allowed=new Set([&quot;getblockchaininfo&quot;
           <input id="ltcWorkers" type="number" min="1" max="16" value="4" />
         </div>
       </div>
+      <div class="row">
+        <div>
+          <label>Local share difficulty: leading zeroes</label>
+          <input id="ltcLocalDiff" type="number" min="1" max="20" value="4" />
+        </div>
+        <div>
+          <label>Best zero alert threshold</label>
+          <input id="ltcBestAlert" type="number" min="4" max="30" value="6" />
+        </div>
+      </div>
       <div class="btn-row">
         <button class="ghost" id="ltcSaveBtn">Save LTC RPC</button>
         <button class="ghost" id="ltcTestBtn">Test LTC Node</button>
@@ -277,6 +287,16 @@ try{const j=await body(req);const allowed=new Set([&quot;getblockchaininfo&quot;
         <div>
           <label>Workers</label>
           <input id="dogeWorkers" type="number" min="1" max="16" value="4" />
+        </div>
+      </div>
+      <div class="row">
+        <div>
+          <label>Local share difficulty: leading zeroes</label>
+          <input id="dogeLocalDiff" type="number" min="1" max="20" value="4" />
+        </div>
+        <div>
+          <label>Best zero alert threshold</label>
+          <input id="dogeBestAlert" type="number" min="4" max="30" value="6" />
         </div>
       </div>
       <div class="btn-row">
@@ -355,8 +375,8 @@ const state = {
     workers:[]
   },
   coins:{
-    ltc:{ rpcUrl:"http://127.0.0.1:8788/ltc", rpcUser:"", rpcPass:"", network:"regtest", payout:"", chain:null, height:null, template:null, work:null },
-    doge:{ rpcUrl:"http://127.0.0.1:8788/doge", rpcUser:"", rpcPass:"", network:"regtest", payout:"", chain:null, height:null, template:null, work:null }
+    ltc:{ rpcUrl:"http://127.0.0.1:8788/ltc", rpcUser:"", rpcPass:"", network:"regtest", payout:"", localDiff:4, bestAlert:6, bestZeros:0, bestHash:"—", chain:null, height:null, template:null, work:null },
+    doge:{ rpcUrl:"http://127.0.0.1:8788/doge", rpcUser:"", rpcPass:"", network:"regtest", payout:"", localDiff:4, bestAlert:6, bestZeros:0, bestHash:"—", chain:null, height:null, template:null, work:null }
   }
 };
 
@@ -375,7 +395,7 @@ function audit(scope,event,payload={}){
 function saveSafe(){
   const safe = JSON.parse(JSON.stringify(state));
   safe.workers = [];
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(safe));
+  try{localStorage.setItem(STORAGE_KEY, JSON.stringify(safe));}catch(e){safe.audit=safe.audit.slice(0,120);try{localStorage.setItem(STORAGE_KEY, JSON.stringify(safe));}catch{}}
 }
 
 function loadSafe(){
@@ -409,6 +429,8 @@ function render(){
     $(coin+"RpcPass").value = c.rpcPass || "";
     $(coin+"Network").value = c.network || "regtest";
     $(coin+"Payout").value = c.payout || "";
+    if($(coin+"LocalDiff")) $(coin+"LocalDiff").value = c.localDiff || 4;
+    if($(coin+"BestAlert")) $(coin+"BestAlert").value = c.bestAlert || 6;
     $(coin+"Chain").textContent = c.chain || "—";
     $(coin+"Height").textContent = c.height ?? "—";
     $(coin+"Target").textContent = c.template?.target ? c.template.target.slice(0,18)+"…" : "—";
@@ -424,7 +446,9 @@ function saveCoinConfig(coin){
   c.rpcPass = $(coin+"RpcPass").value;
   c.network = $(coin+"Network").value;
   c.payout = $(coin+"Payout").value.trim();
-  audit(coin,"rpc_saved",{rpcUrl:c.rpcUrl,network:c.network,payout:c.payout});
+  c.localDiff = Number($(coin+"LocalDiff")?.value || c.localDiff || 4);
+  c.bestAlert = Number($(coin+"BestAlert")?.value || c.bestAlert || 6);
+  audit(coin,"rpc_saved",{rpcUrl:c.rpcUrl,network:c.network,payout:c.payout,localDiff:c.localDiff,bestAlert:c.bestAlert});
   saveSafe();
   render();
 }
@@ -479,25 +503,46 @@ async function doubleShaHex(hex){
   return bytesToHex(new Uint8Array(h2));
 }
 
-/*
-  Address scripts:
-  This build supports a dev-safe OP_TRUE payout script when no address script decoder is available.
-  For real chain work, use your node's generatetoaddress for regtest or extend scriptPubKeyFromAddress.
-*/
-function scriptPubKeyDev(coin,payout){
-  if(!payout){
-    audit(coin,"no_payout_using_op_true",{warning:"No payout address set; using OP_TRUE dev script only."});
-    return "51";
+/* Real address → scriptPubKey support for LTC/DOGE solo coinbase payouts. */
+const BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+const COIN_ADDRESS_PREFIXES = {
+  ltc: {
+    mainnet: { p2pkh:[0x30], p2sh:[0x32,0x05], bech32:["ltc"] },
+    testnet: { p2pkh:[0x6f], p2sh:[0x3a,0xc4], bech32:["tltc"] },
+    regtest: { p2pkh:[0x6f], p2sh:[0x3a,0xc4], bech32:["rltc","tltc"] }
+  },
+  doge: {
+    mainnet: { p2pkh:[0x1e], p2sh:[0x16], bech32:[] },
+    testnet: { p2pkh:[0x71], p2sh:[0xc4], bech32:[] },
+    regtest: { p2pkh:[0x71], p2sh:[0xc4], bech32:[] }
   }
-  // Minimal placeholder: OP_RETURN-style marker for audit/dev. Real use needs scriptPubKey decode for the address type.
-  // Keep block-building path visible without pretending unsupported address decoding is complete.
-  audit(coin,"payout_script_placeholder",{payout,warning:"Scrypt hashing is real now; address-to-scriptPubKey decoding still needs implementation for accepted mainnet submitblock."});
-  return "51";
+};
+function base58Decode(str){let num=0n;for(const ch of str){const p=BASE58_ALPHABET.indexOf(ch);if(p<0)throw new Error("Invalid base58 character");num=num*58n+BigInt(p)}let hex=num.toString(16);if(hex.length%2)hex="0"+hex;let bytes=hex?hex.match(/../g).map(x=>parseInt(x,16)):[];for(const ch of str){if(ch==="1")bytes.unshift(0);else break}return new Uint8Array(bytes)}
+function bytesEq(a,b){if(a.length!==b.length)return false;let d=0;for(let i=0;i<a.length;i++)d|=a[i]^b[i];return d===0}
+async function sha256Bytes(bytes){return new Uint8Array(await crypto.subtle.digest("SHA-256",bytes))}
+async function base58CheckDecode(str){const raw=base58Decode(str);if(raw.length<5)throw new Error("Base58Check payload too short");const payload=raw.slice(0,-4),checksum=raw.slice(-4);const h1=await sha256Bytes(payload),h2=await sha256Bytes(h1);if(!bytesEq(checksum,h2.slice(0,4)))throw new Error("Base58Check checksum failed");return{version:payload[0],data:payload.slice(1)}}
+const BECH32_CHARSET="qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+function bech32Polymod(values){const GEN=[0x3b6a57b2,0x26508e6d,0x1ea119fa,0x3d4233dd,0x2a1462b3];let chk=1;for(const v of values){const top=chk>>25;chk=((chk&0x1ffffff)<<5)^v;for(let i=0;i<5;i++)if((top>>i)&1)chk^=GEN[i]}return chk}
+function bech32HrpExpand(hrp){const out=[];for(let i=0;i<hrp.length;i++)out.push(hrp.charCodeAt(i)>>5);out.push(0);for(let i=0;i<hrp.length;i++)out.push(hrp.charCodeAt(i)&31);return out}
+function bech32Decode(addr){const lower=addr.toLowerCase(),upper=addr.toUpperCase();if(addr!==lower&&addr!==upper)throw new Error("Mixed-case bech32 address");const a=lower,pos=a.lastIndexOf("1");if(pos<1||pos+7>a.length)throw new Error("Invalid bech32 separator");const hrp=a.slice(0,pos),data=[];for(const ch of a.slice(pos+1)){const v=BECH32_CHARSET.indexOf(ch);if(v<0)throw new Error("Invalid bech32 character");data.push(v)}if(bech32Polymod(bech32HrpExpand(hrp).concat(data))!==1)throw new Error("Bech32 checksum failed");return{hrp,data:data.slice(0,-6)}}
+function convertBits(data,fromBits,toBits,pad){let acc=0,bits=0,ret=[];const maxv=(1<<toBits)-1;for(const value of data){if(value<0||(value>>fromBits)!==0)throw new Error("Invalid bech32 data range");acc=(acc<<fromBits)|value;bits+=fromBits;while(bits>=toBits){bits-=toBits;ret.push((acc>>bits)&maxv)}}if(pad){if(bits>0)ret.push((acc<<(toBits-bits))&maxv)}else{if(bits>=fromBits)throw new Error("Invalid bech32 padding");if(((acc<<(toBits-bits))&maxv)!==0)throw new Error("Non-zero bech32 padding")}return new Uint8Array(ret)}
+async function scriptPubKeyFromAddress(coin,payout){
+  if(!payout)throw new Error(`${coin.toUpperCase()} payout address is required. Refusing OP_TRUE/dev payout script.`);
+  const c=state.coins[coin],net=c.network||"regtest",cfg=COIN_ADDRESS_PREFIXES[coin]?.[net];
+  if(!cfg)throw new Error(`Unsupported ${coin} network: ${net}`);
+  if(/^(ltc|tltc|rltc)1/i.test(payout)){
+    const dec=bech32Decode(payout);if(!cfg.bech32.includes(dec.hrp))throw new Error(`Wrong bech32 HRP ${dec.hrp} for ${coin} ${net}`);
+    const version=dec.data[0],program=convertBits(dec.data.slice(1),5,8,false);if(version<0||version>16)throw new Error("Invalid witness version");if(version===0&&!(program.length===20||program.length===32))throw new Error("Invalid witness program length");const opVer=version===0?"00":(0x50+version).toString(16);return opVer+varInt(program.length)+bytesToHex(program)
+  }
+  const decoded=await base58CheckDecode(payout);if(decoded.data.length!==20)throw new Error("Only 20-byte base58 P2PKH/P2SH addresses are supported");const h160=bytesToHex(decoded.data);
+  if(cfg.p2pkh.includes(decoded.version))return "76a914"+h160+"88ac";
+  if(cfg.p2sh.includes(decoded.version))return "a914"+h160+"87";
+  throw new Error(`Address prefix 0x${decoded.version.toString(16)} does not match ${coin.toUpperCase()} ${net}`)
 }
 
-function buildCoinbaseTx(coin,template){
+async function buildCoinbaseTx(coin,template){
   const c = state.coins[coin];
-  const payoutScript = scriptPubKeyDev(coin,c.payout);
+  const payoutScript = await scriptPubKeyFromAddress(coin,c.payout);
   const tagHex = bytesToHex(new TextEncoder().encode("Aurora Solo Scrypt"));
   const scriptSig = encodeHeightScript(template.height) + pushDataHex(tagHex);
   const value = BigInt(template.coinbasevalue || 0);
@@ -533,7 +578,7 @@ async function merkleRootInternal(txidsInternal){
 }
 
 async function buildWork(coin,template){
-  const coinbase = buildCoinbaseTx(coin,template);
+  const coinbase = await buildCoinbaseTx(coin,template);
   const coinbaseInternal = await coinbase.txidPromise;
   const txidsInternal = [coinbaseInternal].concat((template.transactions || []).map(t=>reverseHex(t.txid)));
   const merkleInternal = await merkleRootInternal(txidsInternal);
@@ -559,8 +604,16 @@ async function buildWork(coin,template){
   };
 }
 
+function validateBeforeMining(coin){
+  const c = state.coins[coin];
+  if(!c.rpcUrl) throw new Error(`${coin.toUpperCase()} RPC URL missing`);
+  if(!c.payout) throw new Error(`${coin.toUpperCase()} payout address missing`);
+  if(c.network === "mainnet") audit(coin,"mainnet_warning",{warning:"Mainnet solo Scrypt mining odds are extremely low without ASIC hashpower. Test on regtest/testnet first."});
+}
+
 async function pullTemplate(coin){
   saveCoinConfig(coin);
+  validateBeforeMining(coin);
   const template = await rpc(coin,"getblocktemplate",[{}]);
   state.coins[coin].template = template;
   state.coins[coin].height = template.height;
@@ -588,8 +641,9 @@ function intify(B){return new DataView(B.buffer,B.byteOffset,B.byteLength).getUi
 function xor(a,b){let o=new Uint8Array(a.length);for(let i=0;i<a.length;i++)o[i]=a[i]^b[i];return o}
 function scrypt1024(input){let X=pbkdf1(input,input,128),V=new Array(1024);for(let i=0;i<1024;i++){V[i]=X.slice();X=blockmix(X)}for(let i=0;i<1024;i++)X=blockmix(xor(X,V[intify(X)&1023]));return pbkdf1(input,X,32)}
 function scryptHeaderHash(h){return bytesToHex(scrypt1024(hexToBytes(h)))}
-function meetsTarget(hashInternal,targetHex){return BigInt("0x"+reverseHex(hashInternal))<=BigInt("0x"+targetHex)}
-async function loop(){while(running&&work){let st=performance.now(),hashes=0,lastHash=null,found=[];for(let i=0;i<1;i++){let n=(nonce+workerIndex)>>>0;nonce=(nonce+workerCount)>>>0;let headerHex=work.headerPrefixHex+u32le(n),dig=scryptHeaderHash(headerHex),disp=reverseHex(dig);lastHash=disp;hashes++;if(meetsTarget(dig,work.targetHex))found.push({nonce:n,hash:disp,headerHex})}postMessage({type:"batch",payload:{hashes,lastHash,found,hashRate:hashes/Math.max((performance.now()-st)/1000,0.0001)}});await new Promise(r=>setTimeout(r,0))}}
+function leadingZeros(hex){let n=0;for(const ch of hex){if(ch==="0")n++;else break}return n}
+function meetsTarget(hashInternal,targetHex){return BigInt("0x"+hashInternal)<=BigInt("0x"+targetHex)}
+async function loop(){while(running&&work){let st=performance.now(),hashes=0,lastHash=null,found=[],local=[];for(let i=0;i<(work.batchSize||1);i++){let n=(nonce+workerIndex)>>>0;nonce=(nonce+workerCount)>>>0;let headerHex=work.headerPrefixHex+u32le(n),dig=scryptHeaderHash(headerHex),disp=reverseHex(dig),lz=leadingZeros(disp);lastHash=disp;hashes++;if(lz>=(work.localDiff||4))local.push({nonce:n,hash:disp,zeros:lz});if(meetsTarget(dig,work.targetHex))found.push({nonce:n,hash:disp,headerHex,zeros:lz})}postMessage({type:"batch",payload:{hashes,lastHash,found,local,hashRate:hashes/Math.max((performance.now()-st)/1000,0.0001)}});await new Promise(r=>setTimeout(r,0))}}
 onmessage=e=>{const{type,payload}=e.data||{};if(type==="start"){work=payload.work;workerIndex=payload.workerIndex;workerCount=payload.workerCount;nonce=payload.startNonce>>>0;running=true;loop()}if(type==="stop")running=false};
 `;
 }
@@ -650,11 +704,22 @@ async function startCoin(coin){
       state.rate = [...rates.values()].reduce((a,b)=>a+b,0);
       state.lastHash = payload.lastHash || state.lastHash;
 
+      for(const s of payload.local || []){
+        const c = state.coins[coin];
+        if((s.zeros || 0) > (c.bestZeros || 0)){
+          c.bestZeros = s.zeros;
+          c.bestHash = s.hash;
+          audit(coin,"new_best_scrypt_hash",{hash:s.hash,zeros:s.zeros,nonce:s.nonce,height:c.work?.template?.height});
+        }
+        state.shares += 1;
+        audit(coin,"local_share_found",{hash:s.hash,zeros:s.zeros,nonce:s.nonce,height:c.work?.template?.height,localDiff:c.localDiff});
+      }
+
       for(const f of payload.found || []){
         state.shares += 1;
         const work = state.coins[coin].work;
         const blockHex = f.headerHex + varInt(work.txCount) + work.coinbaseTxHex + work.tailTxHex;
-        audit(coin,"candidate_found",{hash:f.hash,nonce:f.nonce,height:work.template.height});
+        audit(coin,"network_candidate_found",{hash:f.hash,nonce:f.nonce,zeros:f.zeros,height:work.template.height,target:work.targetHex});
         try{
           const result = await rpc(coin,"submitblock",[blockHex]);
           audit(coin,"submitblock_result",{hash:f.hash,result:result===null?"accepted-or-duplicate-null":result});
@@ -665,7 +730,8 @@ async function startCoin(coin){
       saveSafe();
       render();
     };
-    worker.postMessage({type:"start",payload:{work:state.coins[coin].work,workerIndex:i,workerCount:workers,startNonce:i}});
+    const workForWorker = {...state.coins[coin].work, localDiff: state.coins[coin].localDiff || 4, batchSize: 1};
+    worker.postMessage({type:"start",payload:{work:workForWorker,workerIndex:i,workerCount:workers,startNonce:i}});
     state.workers.push(wrapper);
   }
   render();
